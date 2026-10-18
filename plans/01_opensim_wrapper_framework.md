@@ -188,7 +188,7 @@ Regola di completezza: lo script di copertura elenca le classi native pubbliche 
 - **S06** – Infrastruttura di esportazione: `tests/test_package_structure.py` (regole §5bis) + piccolo script `scripts/check_exports.py`; spike Pylance su `__all__ = [*mod.__all__]` con star-import (autocomplete e hover OK, oppure scelta della forma letterale). · *Dip.*: S05 · *Verifica*: test eseguibile sulla struttura attuale (può segnalare le violazioni preesistenti, elencate come to-do).
 
 **Fase 1 – Schema**
-- **S10** – `introspect_opensim.py`: elenco classi + gerarchia + flag astratta/concreta → JSON. · *Dip.*: S00 · *Verifica*: 724 classi, Moco escluso per prefisso.
+- **S10** – `introspect_opensim.py`: elenco classi + gerarchia + flag astratta/concreta → JSON. · *Dip.*: S00 · *Verifica*: 639 classi pubbliche rilevate da OpenSim 4.6, Moco escluso per prefisso (numero version-specific).
 - **S11** – Estensione schema: proprietà (nome, tipo, list, default, commento). · *Dip.*: S10 · *Verifica*: `Body.mass`, `PinJoint` presenti.
 - **S12** – Estensione schema: metodi pubblici con overload, socket/input/output. · *Dip.*: S11.
 - **S13** – Raccolta docstring (Doxygen → SWIG → `Property` comment → fallback) e normalizzazione NumPy nello schema. · *Dip.*: S12 · *Verifica*: report % di classi con docstring.
