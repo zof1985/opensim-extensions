@@ -57,7 +57,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from .. import _geometry
+from .._internal import geometry as _geometry
 
 __all__ = ["VTKVisualizer", "DEFAULT_SIZE", "VIEW_NAMES"]
 

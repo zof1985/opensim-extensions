@@ -40,8 +40,9 @@ Esecuzione test (Windows, tmp di pytest non accessibile):
 - [x] S26 stubs di 639 classi non-Moco in `typings/opensim/__init__.pyi`; rigenerazione, sintassi e copertura verificati. Firme native generiche `Any` perché SWIG non espone `__text_signature__`; verifica Pylance/pyright rimane da fare (Pylance MCP transport failure, pyright CLI assente).
 
 ## Fase 3 – modello nativo
-- [ ] S30 struttura fisica modulare (`core/`, `_internal/`, `viz/`); top-level esistente resta stabile finché la migrazione non è completa.
-- [x] S30A `OpenSimModel` eredita direttamente da `opensim.Model`; 2 test nuovi mirati verdi.
+- [ ] S30 struttura modulare in corso: creati i namespace `core/`, `wrappers/`, `framework/`, `viz/`; `__init__.py` top-level re-esporta i nomi pubblici con `*` e `__all__`; `_geometry.py` trasferito in `_internal/geometry.py`. `model.py`/`_cad_import.py` non sono ancora stati fisicamente suddivisi/spostati.
+- [x] S30A `OpenSimModel` eredita direttamente da `opensim.Model`; tre test nuovi mirati passano (istanza, metodi nativi, copia indipendente).
+- Test mirati dopo i cambi S30/S30A: `test_model_inheritance.py` + `test_package_structure.py`: 35 passati. I test delle classi legacy `Box/Cylinder/Screen` non sono gate (pianificata rimozione S37).
 
 ## Note operative
 - I wrapper sono temporaneamente nel package privato `_generated` per evitare collisioni con i wrapper legacy in `components`; vanno spostati/esposti quando la migrazione (S39) li sostituisce.

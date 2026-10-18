@@ -1,16 +1,18 @@
-"""opensim_models init module"""
+"""Public top-level API for OpenSim model wrappers and tools."""
 
-from . import model, components, models, operators, _animation
-from .model import *
-from .components import *
+from . import core, components, wrappers, models, operators, framework, viz
+from .core import *
+from .wrappers import *
 from .models import *
 from .operators import *
-from ._animation import *
+from .framework import *
+from .viz import *
 
 __all__ = [
-    *model.__all__,
-    *components.__all__,
+    *core.__all__,
+    *wrappers.__all__,
     *models.__all__,
     *operators.__all__,
-    *_animation.__all__,
+    *framework.__all__,
+    *viz.__all__,
 ]

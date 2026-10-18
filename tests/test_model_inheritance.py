@@ -20,3 +20,15 @@ def test_open_sim_model_exposes_native_model_methods_directly():
     model.addBody(body)
 
     assert model.getBodySet().get("body").getName() == "body"
+
+
+def test_copy_returns_independent_native_model_subclass():
+    source = OpenSimModel()
+    source.setName("source")
+
+    duplicate = source.copy()
+    assert isinstance(duplicate, OpenSimModel)
+    assert int(duplicate.this) != int(source.this)
+
+    duplicate.setName("duplicate")
+    assert source.getName() == "source"

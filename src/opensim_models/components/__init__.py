@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .. import _geometry
+from .._internal import geometry as _geometry
 
 if TYPE_CHECKING:
     from ..model import OpenSimModel
@@ -308,7 +308,7 @@ class Body(_ComponentWrapper):
         item attached to this body (local-frame bounds unioned across all
         of them, via the same ``Mesh``/``Brick``/``Cylinder``/``Sphere``
         dispatch :class:`~opensim_models._gui.visualizer.VTKVisualizer`
-        uses to render them -- see :mod:`opensim_models._geometry`),
+        uses to render them -- see :mod:`opensim_models._internal.geometry`),
         transformed through this body's current ground-frame placement.
         Empty if this body has no attached geometry, or none of it could
         be resolved (e.g. a mesh file that can't be found).

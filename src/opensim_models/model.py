@@ -262,9 +262,13 @@ class OpenSimModel(_OpenSimModelBase):
         """
         self._sync_coordinate_defaults()
 
-        clone = self.opensim.Model(self)
+        clone = self.clone()
         clone.__class__ = type(self)
-        clone.__dict__.update(self.__dict__)
+        clone.__dict__.update(
+            (name, value)
+            for name, value in self.__dict__.items()
+            if name not in {"this", "thisown"}
+        )
         clone.state = clone.initSystem()
         clone._geometry_dirs = list(self._geometry_dirs)
         clone._anchor_names = set(self._anchor_names)
