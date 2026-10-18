@@ -43,6 +43,14 @@ Esecuzione test (Windows, tmp di pytest non accessibile):
 - [ ] S30 struttura modulare in corso: creati i namespace `core/`, `wrappers/`, `framework/`, `viz/`; `__init__.py` top-level re-esporta i nomi pubblici con `*` e `__all__`; `_geometry.py` trasferito in `_internal/geometry.py`. `model.py`/`_cad_import.py` non sono ancora stati fisicamente suddivisi/spostati.
 - [x] S30A `OpenSimModel` eredita direttamente da `opensim.Model`; tre test nuovi mirati passano (istanza, metodi nativi, copia indipendente).
 - Test mirati dopo i cambi S30/S30A: `test_model_inheritance.py` + `test_package_structure.py`: 35 passati. I test delle classi legacy `Box/Cylinder/Screen` non sono gate (pianificata rimozione S37).
+- [ ] S31 in corso: i 51 riferimenti `self.model.<native_api>` in `model.py` sono stati migrati a `self.<native_api>`; l'alias temporaneo `model` resta finché operatori e GUI non sono migrati.
+
+## Fase 4 – I/O
+- [x] S40 `OpenSimModel.from_osim(file, meshes=...)`; registra modello/Geometry/percorsi espliciti prima di caricare.
+- [x] S41 validazione file e mesh mancanti / tipi errati.
+- [x] S42 `to_osim(file, with_meshes=True, mesh_dir="Geometry")`; test scrittura e copia mesh.
+- [ ] S43 round-trip `User` e rimozione completa di `export()`/`__init__(model_path)` da completare; il caricamento di modelli base è coperto da S40-S42.
+- Test mirati I/O + ereditarietà + struttura: 40 passati.
 
 ## Note operative
 - I wrapper sono temporaneamente nel package privato `_generated` per evitare collisioni con i wrapper legacy in `components`; vanno spostati/esposti quando la migrazione (S39) li sostituisce.

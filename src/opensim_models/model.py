@@ -235,6 +235,67 @@ class OpenSimModel(_OpenSimModelBase):
         self._player_window: Any | None = None
         _register_owner(self)
 
+    @classmethod
+    def from_osim(
+        cls,
+        file: str | Path,
+        meshes: str | Path | Sequence[str | Path] | None = None,
+    ) -> "OpenSimModel":
+        """Load a model after registering its geometry search directories.
+
+        Parameters
+        ----------
+        file : str or pathlib.Path
+            Existing OpenSim model file.
+        meshes : str, pathlib.Path, sequence of paths, or None, optional
+            Additional mesh files or directories. A file path contributes
+            its parent directory. The model directory and sibling
+            ``Geometry`` directory are registered automatically.
+
+        Returns
+        -------
+        OpenSimModel
+            Loaded model with the mesh search paths recorded.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the model file or an explicitly supplied mesh path is absent.
+        TypeError
+            If ``meshes`` contains a value other than ``str`` or ``Path``.
+        """
+        model_file = Path(file).expanduser().resolve()
+        if not model_file.is_file():
+            raise FileNotFoundError(model_file)
+
+        if meshes is None:
+            mesh_paths: Sequence[str | Path] = ()
+        elif isinstance(meshes, (str, Path)):
+            mesh_paths = (meshes,)
+        else:
+            mesh_paths = meshes
+
+        directories = [model_file.parent, model_file.parent / "Geometry"]
+        for item in mesh_paths:
+            if not isinstance(item, (str, Path)):
+                raise TypeError(
+                    "meshes must contain only str or pathlib.Path values; "
+                    f"got {type(item).__name__}"
+                )
+            path = Path(item).expanduser().resolve()
+            if not path.exists():
+                raise FileNotFoundError(path)
+            directories.append(path if path.is_dir() else path.parent)
+
+        opensim = import_opensim()
+        unique_directories = list(dict.fromkeys(directories))
+        for directory in unique_directories:
+            _register_geometry_search_path(opensim, directory)
+
+        model = cls(model_file)
+        model._geometry_dirs = unique_directories
+        return model
+
     @property
     def model(self) -> "OpenSimModel":
         """Temporary internal alias for the model itself during migration.
@@ -331,7 +392,7 @@ class OpenSimModel(_OpenSimModelBase):
             When ``True`` (default), attach each body to ground with a
             ``FreeJoint`` at its original CAD position and initialize the
             model. When ``False``, bodies are added without joints and the
-            caller must connect them and call ``model.model.initSystem()``
+            caller must connect them and call ``model.initSystem()``
             before using the model.
         linear_deflection, angular_deflection : float, optional
             Tessellation tolerances (metres, radians) forwarded to the mesh
@@ -396,7 +457,7 @@ class OpenSimModel(_OpenSimModelBase):
                 model.opensim.Vec3(0, 0, 0),
                 model.opensim.Inertia(*inertia),
             )
-            model.model.addBody(body)
+            model.addBody(body)
             for part_name, solid, _, _, _ in parts:
                 mesh_paths = _write_solid_mesh(
                     solid,
@@ -411,14 +472,14 @@ class OpenSimModel(_OpenSimModelBase):
             if add_free_joints:
                 joint = model.opensim.FreeJoint(
                     f"{body_name}_joint",
-                    model.model.getGround(),
+                    model.getGround(),
                     model.opensim.Vec3(*center_of_mass),
                     model.opensim.Vec3(0, 0, 0),
                     body,
                     model.opensim.Vec3(0, 0, 0),
                     model.opensim.Vec3(0, 0, 0),
                 )
-                model.model.addJoint(joint)
+                model.addJoint(joint)
         else:
             for body_name, solid, mass, center_of_mass, inertia in parts:
                 mesh_paths = _write_solid_mesh(
@@ -435,25 +496,25 @@ class OpenSimModel(_OpenSimModelBase):
                     model.opensim.Vec3(0, 0, 0),
                     model.opensim.Inertia(*inertia),
                 )
-                model.model.addBody(body)
+                model.addBody(body)
                 for mesh_path in mesh_paths:
                     body.attachGeometry(model.opensim.Mesh(mesh_path.name))
 
                 if add_free_joints:
                     joint = model.opensim.FreeJoint(
                         f"{body_name}_joint",
-                        model.model.getGround(),
+                        model.getGround(),
                         model.opensim.Vec3(*center_of_mass),
                         model.opensim.Vec3(0, 0, 0),
                         body,
                         model.opensim.Vec3(0, 0, 0),
                         model.opensim.Vec3(0, 0, 0),
                     )
-                    model.model.addJoint(joint)
+                    model.addJoint(joint)
 
         if add_free_joints:
-            model.model.finalizeConnections()
-            model.state = model.model.initSystem()
+            model.finalizeConnections()
+            model.state = model.initSystem()
         return model
 
     def _unlock_coordinates(self) -> None:
@@ -464,7 +525,7 @@ class OpenSimModel(_OpenSimModelBase):
         constraints, so removing them is safe and lets specific models
         expose posture setters for the full coordinate set.
         """
-        coordinates = self.model.getCoordinateSet()
+        coordinates = self.getCoordinateSet()
         for index in range(coordinates.getSize()):
             coordinates.get(index).set_locked(False)
 
@@ -472,24 +533,24 @@ class OpenSimModel(_OpenSimModelBase):
     def ground(self) -> Any:
         """This model's ground frame (``opensim.Ground``).
 
-        A thin convenience over ``self.model.getGround()``, returned as the
+        A thin convenience over ``self.getGround()``, returned as the
         raw ``opensim`` object rather than wrapped in
         :class:`~opensim_models.components.Body` (``Ground`` is a
         ``PhysicalFrame``, not a ``Body`` -- it carries no mass/inertia, so
         most of that wrapper's API wouldn't apply to it). Use it directly
         as the fixed parent frame for a joint (e.g. ``operators.add_weld_joint``,
         a component's ``attach_component``/constructor ``to=``) wherever
-        ``self.model.getGround()`` would otherwise be spelled out.
+        ``self.getGround()`` would otherwise be spelled out.
 
         Returns
         -------
         opensim.Ground
             This model's ground frame. Rebuilt fresh on every access (via
-            ``self.model.getGround()``), so it always reflects the current
+            ``self.getGround()``), so it always reflects the current
             ``self.model`` -- never a stale reference from before a
             structural change replaced it.
         """
-        return self.model.getGround()
+        return self.getGround()
 
     @property
     def bodies(self) -> dict[str, "components.Body"]:
@@ -508,7 +569,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components.Body(self, item)
-            for item in _iter_set(self.model.getBodySet())
+            for item in _iter_set(self.getBodySet())
         }
 
     @property
@@ -528,7 +589,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components.Joint(self, item)
-            for item in _iter_set(self.model.getJointSet())
+            for item in _iter_set(self.getJointSet())
         }
 
     @property
@@ -548,7 +609,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components.Muscle(self, item)
-            for item in _iter_set(self.model.getMuscles())
+            for item in _iter_set(self.getMuscles())
         }
 
     @property
@@ -566,7 +627,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components.Marker(self, item)
-            for item in _iter_set(self.model.getMarkerSet())
+            for item in _iter_set(self.getMarkerSet())
         }
 
     @property
@@ -591,7 +652,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components.Coordinate(self, item)
-            for item in _iter_set(self.model.getCoordinateSet())
+            for item in _iter_set(self.getCoordinateSet())
         }
 
     @property
@@ -654,7 +715,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         opensim = self.opensim
         result: dict[str, components.Frame] = {}
-        for item in self.model.getFrameList():
+        for item in self.getFrameList():
             if opensim.Body.safeDownCast(item) is not None:
                 continue
             if opensim.Ground.safeDownCast(item) is not None:
@@ -695,7 +756,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components._wrap_force(self, item)
-            for item in _iter_set(self.model.getForceSet())
+            for item in _iter_set(self.getForceSet())
         }
 
     @property
@@ -720,7 +781,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components._wrap_constraint(self, item)
-            for item in _iter_set(self.model.getConstraintSet())
+            for item in _iter_set(self.getConstraintSet())
         }
 
     @property
@@ -739,7 +800,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components.Controller(self, item)
-            for item in _iter_set(self.model.getControllerSet())
+            for item in _iter_set(self.getControllerSet())
         }
 
     @property
@@ -764,7 +825,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components._wrap_contact_geometry(self, item)
-            for item in _iter_set(self.model.getContactGeometrySet())
+            for item in _iter_set(self.getContactGeometrySet())
         }
 
     @property
@@ -782,7 +843,7 @@ class OpenSimModel(_OpenSimModelBase):
 
         return {
             item.getName(): components.Probe(self, item)
-            for item in _iter_set(self.model.getProbeSet())
+            for item in _iter_set(self.getProbeSet())
         }
 
     def body(self, name: str) -> "components.Body":
@@ -809,7 +870,7 @@ class OpenSimModel(_OpenSimModelBase):
         """
         from . import components
 
-        return components.Body(self, self.model.getBodySet().get(name))
+        return components.Body(self, self.getBodySet().get(name))
 
     def joint(self, name: str) -> "components.Joint":
         """Look up a single joint by its exact OpenSim name.
@@ -834,7 +895,7 @@ class OpenSimModel(_OpenSimModelBase):
         """
         from . import components
 
-        return components.Joint(self, self.model.getJointSet().get(name))
+        return components.Joint(self, self.getJointSet().get(name))
 
     def muscle(self, name: str) -> "components.Muscle":
         """Look up a single muscle by its exact OpenSim name.
@@ -863,7 +924,7 @@ class OpenSimModel(_OpenSimModelBase):
         """
         from . import components
 
-        return components.Muscle(self, self.model.getMuscles().get(name))
+        return components.Muscle(self, self.getMuscles().get(name))
 
     def marker(self, name: str) -> "components.Marker":
         """Look up a single marker by its exact OpenSim name.
@@ -888,7 +949,7 @@ class OpenSimModel(_OpenSimModelBase):
         """
         from . import components
 
-        return components.Marker(self, self.model.getMarkerSet().get(name))
+        return components.Marker(self, self.getMarkerSet().get(name))
 
     def coordinate(self, name: str) -> "components.Coordinate":
         """Look up a single coordinate by its exact OpenSim name.
@@ -914,7 +975,7 @@ class OpenSimModel(_OpenSimModelBase):
         """
         from . import components
 
-        return components.Coordinate(self, self.model.getCoordinateSet().get(name))
+        return components.Coordinate(self, self.getCoordinateSet().get(name))
 
     def update_state(self) -> None:
         """Propagate every raw value set on :attr:`state` to derived quantities.
@@ -934,7 +995,7 @@ class OpenSimModel(_OpenSimModelBase):
         that stage is not reliably safe to realize on every OpenSim model
         (it can crash the process outright on some muscle-driven models,
         a native failure Python cannot catch or prevent). If you need
-        accelerations, call ``model.model.realizeAcceleration(model.state)``
+        accelerations, call ``model.realizeAcceleration(model.state)``
         yourself, aware of that risk.
 
         Does *not* re-solve a :class:`opensim.CoordinateCouplerConstraint`
@@ -946,11 +1007,11 @@ class OpenSimModel(_OpenSimModelBase):
         actual use (not just export), use :meth:`reinitialize` instead,
         which re-derives it through the coordinate's *default* value.
         """
-        self.model.realizePosition(self.state)
-        self.model.realizeVelocity(self.state)
+        self.realizePosition(self.state)
+        self.realizeVelocity(self.state)
         if len(self.muscles) > 0:
-            self.model.equilibrateMuscles(self.state)
-        self.model.realizeDynamics(self.state)
+            self.equilibrateMuscles(self.state)
+        self.realizeDynamics(self.state)
 
     @staticmethod
     def _positive(value: float) -> float:
@@ -972,13 +1033,13 @@ class OpenSimModel(_OpenSimModelBase):
         defaults through the constraint's function, since OpenSim does not
         do this automatically when a default value is set directly.
         """
-        coordinates = self.model.getCoordinateSet()
+        coordinates = self.getCoordinateSet()
         for index in range(coordinates.getSize()):
             coordinate = coordinates.get(index)
             coordinate.setDefaultValue(coordinate.getValue(self.state))
             coordinate.setDefaultSpeedValue(coordinate.getSpeedValue(self.state))
 
-        constraints = self.model.getConstraintSet()
+        constraints = self.getConstraintSet()
         for index in range(constraints.getSize()):
             coupler = self.opensim.CoordinateCouplerConstraint.safeDownCast(
                 constraints.get(index)
@@ -1009,12 +1070,12 @@ class OpenSimModel(_OpenSimModelBase):
         immediately invalidates ``state`` itself, not just its defaults.
         Use :meth:`structural_change` to wrap that kind of change instead.
 
-        Calling ``model.model.initSystem()`` directly instead of this
+        Calling ``model.initSystem()`` directly instead of this
         resets every coordinate to the model's original default.
         """
         self._sync_coordinate_defaults()
-        self.model.finalizeConnections()
-        self.state = self.model.initSystem()
+        self.finalizeConnections()
+        self.state = self.initSystem()
 
     def settle_under_gravity(
         self,
@@ -1029,7 +1090,7 @@ class OpenSimModel(_OpenSimModelBase):
         dynamics in OpenSim) to advance :attr:`state` from its current time
         by ``duration_s`` seconds, under whatever forces are present --
         gravity (already enabled by default on every ``opensim.Model``,
-        ``(0, -9.80665, 0)``, unless changed via ``self.model.setGravity``),
+        ``(0, -9.80665, 0)``, unless changed via ``self.setGravity``),
         muscles, and any contact force such as one added by
         :meth:`add_sliding_point_contact`. There is no separate "did it
         reach equilibrium" check: call this with a ``duration_s`` long
@@ -1117,7 +1178,7 @@ class OpenSimModel(_OpenSimModelBase):
         accuracy = self._positive(accuracy)
         max_step_size_s = self._positive(max_step_size_s)
 
-        for joint in _iter_set(self.model.getJointSet()):
+        for joint in _iter_set(self.getJointSet()):
             if self.opensim.FreeJoint.safeDownCast(joint) is not None:
                 raise RuntimeError(
                     f"settle_under_gravity: joint {joint.getName()!r} is an "
@@ -1128,7 +1189,7 @@ class OpenSimModel(_OpenSimModelBase):
                     "User's own 6-dof root joint, before calling this method."
                 )
 
-        self.model.realizePosition(self.state)
+        self.realizePosition(self.state)
         manager = self.opensim.Manager(self.model)
         manager.setIntegratorAccuracy(accuracy)
         manager.setIntegratorMaximumStepSize(max_step_size_s)
@@ -1167,8 +1228,8 @@ class OpenSimModel(_OpenSimModelBase):
         """
         self._sync_coordinate_defaults()
         yield self
-        self.model.finalizeConnections()
-        self.state = self.model.initSystem()
+        self.finalizeConnections()
+        self.state = self.initSystem()
 
     def rotate(
         self,
@@ -1507,7 +1568,7 @@ class OpenSimModel(_OpenSimModelBase):
             strictly positive (checked only for body names that do exist
             in the model).
         """
-        body_set = self.model.getBodySet()
+        body_set = self.getBodySet()
         scale_set = self.opensim.ScaleSet()
         for body_name, axes in factors.items():
             if not body_set.contains(body_name):
@@ -1519,12 +1580,16 @@ class OpenSimModel(_OpenSimModelBase):
             scale.setScaleFactors(self.opensim.Vec3(*axes))
             scale.setApply(True)
             scale_set.adoptAndAppend(scale)
-        self.model.scale(self.state, scale_set, True)
+        self.scale(self.state, scale_set, True)
         self._sync_coordinate_defaults()
-        self.state = self.model.initSystem()
+        self.state = self.initSystem()
 
-    def export(
-        self, model_path: str | Path, *, geometry_dir_name: str = "Geometry"
+    def to_osim(
+        self,
+        file: str | Path,
+        *,
+        with_meshes: bool = True,
+        mesh_dir: str = "Geometry",
     ) -> Path:
         """Save the current model, including scaling and posture, as ``.osim``.
 
@@ -1536,42 +1601,47 @@ class OpenSimModel(_OpenSimModelBase):
         configuration.
 
         Any mesh referenced by an attached body geometry is also copied next
-        to the exported file, under ``geometry_dir_name`` -- the folder name
+        to the exported file, under ``mesh_dir`` -- the folder name
         OpenSim/Simbody search for automatically next to a ``.osim`` file --
         so the export is self-contained and portable on its own.
 
         Parameters
         ----------
-        model_path : str or pathlib.Path
+        file : str or pathlib.Path
             Destination path for the exported model file.
-        geometry_dir_name : str, optional
+        with_meshes : bool, optional
+            If true, copy referenced mesh files beside the model.
+        mesh_dir : str, optional
             Name of the sibling folder receiving copies of the referenced
             mesh files. Defaults to ``"Geometry"``.
 
         Returns
         -------
         pathlib.Path
-            ``model_path``, as a :class:`pathlib.Path` -- the path the
+            ``file``, as a :class:`pathlib.Path` -- the path the
             ``.osim`` file was actually written to.
 
         Raises
         ------
         RuntimeError
-            If the file cannot be written (e.g. ``model_path``'s parent
+            If the file cannot be written (e.g. ``file``'s parent
             directory does not exist, or the path is not writable). This
             surfaces unchanged from OpenSim's own ``printToXML()`` call (a
             native ``std::exception`` crossing into Python as a
             ``RuntimeError``), not a friendlier Python exception.
         """
         self._sync_coordinate_defaults()
-        destination = Path(model_path)
-        self.model.printToXML(str(destination))
-        self._export_mesh_files(destination.parent / geometry_dir_name)
+        destination = Path(file)
+        self.printToXML(str(destination))
+        if with_meshes:
+            if not mesh_dir or Path(mesh_dir).is_absolute():
+                raise ValueError("mesh_dir must be a non-empty relative directory name")
+            self._export_mesh_files(destination.parent / mesh_dir)
         return destination
 
     def _referenced_mesh_filenames(self) -> set[str]:
         filenames: set[str] = set()
-        for body in _iter_set(self.model.getBodySet()):
+        for body in _iter_set(self.getBodySet()):
             geometry_property = body.getPropertyByName("attached_geometry")
             for index in range(geometry_property.size()):
                 mesh = self.opensim.Mesh.safeDownCast(body.get_attached_geometry(index))
@@ -1741,7 +1811,7 @@ class OpenSimModel(_OpenSimModelBase):
             self.add_geometry_directory(geometry_path)
 
         coordinates = self._capture_coordinate_values()
-        self.state = self.model.initSystem()
+        self.state = self.initSystem()
         self._restore_coordinate_values(coordinates)
 
         if self._player_window is not None:
@@ -1774,7 +1844,7 @@ class OpenSimModel(_OpenSimModelBase):
         return self._player
 
     def _capture_coordinate_values(self) -> dict[str, float]:
-        coordinates = self.model.getCoordinateSet()
+        coordinates = self.getCoordinateSet()
         return {
             coordinates.get(index)
             .getName(): coordinates.get(index)
@@ -1785,13 +1855,13 @@ class OpenSimModel(_OpenSimModelBase):
     def _restore_coordinate_values(self, values: dict[str, float]) -> None:
         if not values:
             return
-        coordinates = self.model.getCoordinateSet()
+        coordinates = self.getCoordinateSet()
         for index in range(coordinates.getSize()):
             coordinate = coordinates.get(index)
             value = values[coordinate.getName()]
             if not coordinate.get_locked():
                 coordinate.setValue(self.state, value, False)
-        self.model.realizePosition(self.state)
+        self.realizePosition(self.state)
 
     def add_model(self, other: "OpenSimModel", *, name: str | None = None) -> None:
         """Merge another model's components into this one, in place.
@@ -1884,7 +1954,7 @@ class OpenSimModel(_OpenSimModelBase):
                 clone.thisown = False  # ownership now belongs to self.model; avoids a double-free crash on GC
                 added.append((set_key, clone.getName()))
 
-        self.model.finalizeFromProperties()
+        self.finalizeFromProperties()
         if renamed_paths:
             _patch_sockets(self.model, renamed_paths)
 
@@ -1894,9 +1964,9 @@ class OpenSimModel(_OpenSimModelBase):
             )
             self._anchor_names.add(anchor_name)
             anchor = self.opensim.PhysicalOffsetFrame(
-                anchor_name, self.model.getGround(), self.opensim.Transform()
+                anchor_name, self.getGround(), self.opensim.Transform()
             )
-            self.model.addComponent(anchor)
+            self.addComponent(anchor)
             anchor.thisown = False
             anchor_path = f"/{anchor_name}"
             for original_name in ground_parent_joints:
@@ -1910,8 +1980,8 @@ class OpenSimModel(_OpenSimModelBase):
             # The anchor frame is not tracked for removal: it is cheap to leave
             # orphaned after remove_model and OpenSim tolerates unused frames.
 
-        self.model.finalizeConnections()
-        self.state = self.model.initSystem()
+        self.finalizeConnections()
+        self.state = self.initSystem()
         self._geometry_dirs.extend(other._geometry_dirs)
         self._merged[id(other)] = added
 
@@ -1978,8 +2048,8 @@ class OpenSimModel(_OpenSimModelBase):
                 if index >= 0:
                     target_set.remove(index)
 
-        self.model.finalizeConnections()
-        self.state = self.model.initSystem()
+        self.finalizeConnections()
+        self.state = self.initSystem()
 
     def add_body(
         self,
@@ -2070,7 +2140,7 @@ class OpenSimModel(_OpenSimModelBase):
             frame, offset by ``child_position``/``child_orientation_deg``).
         parent_frame : opensim.PhysicalFrame, components wrapper, or None, optional
             Frame the joint connects ``child_body`` to. Defaults to this
-            model's ground (``self.model.getGround()``) when ``None``.
+            model's ground (``self.getGround()``) when ``None``.
         position : tuple[float, float, float], optional
             Joint location in ``parent_frame``, in metres. Defaults to
             ``(0.0, 0.0, 0.0)``; with the body's own ``mass_center`` left
@@ -2800,7 +2870,7 @@ class OpenSimModel(_OpenSimModelBase):
         This removes 3 relative translational degrees of freedom; relative
         orientation stays free -- use :meth:`add_weld_constraint` instead
         if orientation should be locked too. **Only use this when one of
-        ``body1``/``body2`` is this model's ground** (``self.model.getGround()``):
+        ``body1``/``body2`` is this model's ground** (``self.getGround()``):
         a ``PointConstraint`` between two non-ground bodies has been
         confirmed (OpenSim 4.6) to crash the process natively during
         ``initSystem()``, not raise a catchable Python exception.
