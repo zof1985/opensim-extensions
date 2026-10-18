@@ -32,3 +32,6 @@ opensim_models = ["models/user/assets/*", "models/user/assets/meshes/*"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.pyright]
+stubPath = "typings"

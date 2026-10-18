@@ -36,8 +36,8 @@ Esecuzione test (Windows, tmp di pytest non accessibile):
 - [x] S20-S22 generatore deterministico, wrapper `Body`, property getter e `set_*` per proprietà non-lista in staging privato `src/opensim_models/_generated/` (le liste attendono accessor dedicati; niente reinitialize automatico).
 - [x] S23 registry concreto + downcast/re-class per `Body`.
 - [x] S24 freschezza e test docstring/property; suite mirata 35 passati.
-- [ ] S25 stub campione (tool Pylance MCP irraggiungibile; generatore stub alternativo da predisporre).
-- [ ] S26 stub completi.
+- [x] S25 stub parziali campione + `stubPath`/marker `partial`.
+- [x] S26 stubs di 639 classi non-Moco in `typings/opensim/__init__.pyi`; rigenerazione, sintassi e copertura verificati. Firme native generiche `Any` perché SWIG non espone `__text_signature__`; verifica Pylance/pyright rimane da fare (Pylance MCP transport failure, pyright CLI assente).
 
 ## Fase 3 – modello nativo
 - [ ] S30 struttura fisica modulare (`core/`, `_internal/`, `viz/`); top-level esistente resta stabile finché la migrazione non è completa.

@@ -45,7 +45,7 @@ Dimensione dell'albero delle classi (misurata su `opensim` 4.6):
 - **D2** Wrapper generati da schema di introspezione (JSON versionato) → rendering in `wrappers/<area>/` (struttura e regole di esportazione in §5bis). **`User` è l'unica sottoclasse di `OpenSimModel` mantenuta**; `Box`, `Cylinder`, `Screen` (e `_primitives.py`, `components/assets/meshes`) vengono eliminati per ora, e reintrodotti in futuro solo se serviranno (come sottoclassi dei wrapper generati).
 - **D3** Per ogni `Property` nativa: `@property <name>` (getter tipizzato; `Vec3`→`np.ndarray`, liste→`list`) e `set_<name>(value, *, reinitialize=False) -> Self`; per le proprietà-lista anche `append_<name>`, `clear_<name>`, `set_<name>_at`. Metodi nativi non wrappati restano accessibili per eredità (+ stub `.pyi`).
 - **D4** Docstring NumPy ricavate da: Doxygen opensim-core 4.6 (se reperibile) → `__doc__` SWIG → `Property.getComment()` → fallback (nome + firma). Qualità verificata da test.
-- **D5** Stub `.pyi` generati per tutte le 724 classi native (`typings/opensim/`), così ciò che è ereditato è documentato nell'IDE.
+- **D5** Stub `.pyi` parziali generati per tutte le classi native pubbliche non-Moco trovate dallo schema (`typings/opensim/`); i metodi SWIG senza firme introspezionabili usano inizialmente `*args/**kwargs: Any` con docstring conservate e vengono raffinati a gruppi per area. Il gate finale richiede firme esplicite sulle API più usate di `OpenSimModel`.
 
 ## 5bis. Struttura modulare del pacchetto e regole di esportazione
 
@@ -200,8 +200,8 @@ Regola di completezza: lo script di copertura elenca le classi native pubbliche 
 - **S22** – Template `set_*` letterali; il setter chiama il metodo SWIG non sovrascritto tramite la classe nativa (evita ricorsione). Nessun `reinitialize` automatico: un componente re-class non conserva in modo affidabile il proprietario modello e il chiamante re-inizializza il modello esplicitamente se necessario. Proprietà-lista escluse finché non sono implementati/testati gli accessor indicizzati (`append_`, `clear_`, `set_<name>_at`). · *Dip.*: S21, S04.
 - **S23** – Mappa `classe nativa → wrapper` + funzione di re-class (secondo S03). · *Dip.*: S22.
 - **S24** – Test di freschezza dei generati + test qualità docstring NumPy. · *Dip.*: S23.
-- **S25** – `generate_opensim_stubs.py`: stub di 5 classi campione (`Model`, `Body`, `Joint`, `Coordinate`, `Force`) + `stubPath`. · *Dip.*: S14.
-- **S26** – Stub per tutte le classi native (non-Moco); verifica Pylance. · *Dip.*: S25.
+- **S25** – `generate_opensim_stubs.py`: stub parziali di 5 classi campione (`Model`, `Body`, `Joint`, `Coordinate`, `Force`) + `stubPath` e freshness test. · *Dip.*: S14.
+- **S26** – Stub per tutte le classi native pubbliche non-Moco; verifica Pylance/pyright e affina le firme delle API centrali quando disponibili. · *Dip.*: S25.
 
 **Fase 3 – `OpenSimModel(opensim.Model)`** (ogni step lascia i test del suo ambito verdi)
 - **S30** – Creazione scheletro pacchetto (§5bis): cartelle `_internal/`, `core/`, `wrappers/`, `framework/`, `viz/` con `__init__.py` secondo le regole di esportazione; spostamento dei file privati in `_internal/` (`_geometry`, `_cad_import`, helper DLL/naming) con import interni aggiornati; `opensim_models/__init__.py` con star-import e `__all__` aggregato; `test_package_structure` verde sulle parti già migrate. · *Dip.*: S06, S03.
