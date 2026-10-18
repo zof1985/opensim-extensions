@@ -121,7 +121,14 @@ def import_opensim() -> Any:
     return opensim
 
 
-class OpenSimModel:
+try:
+    _OpenSimModelBase = import_opensim().Model
+except RuntimeError:
+    class _OpenSimModelBase:
+        """Import-time placeholder when the optional OpenSim binding is absent."""
+
+
+class OpenSimModel(_OpenSimModelBase):
     """Generic, composable facade over an OpenSim model instance.
 
     Parameters
@@ -212,14 +219,14 @@ class OpenSimModel:
         self.opensim = import_opensim()
         if model_path is None:
             self.model_path = None
-            self.model = self.opensim.Model()
+            self.opensim.Model.__init__(self)
         else:
             self.model_path = Path(model_path)
             if not self.model_path.is_file():
                 raise FileNotFoundError(self.model_path)
-            self.model = self.opensim.Model(str(self.model_path))
+            self.opensim.Model.__init__(self, str(self.model_path))
         self._unlock_coordinates()
-        self.state = self.model.initSystem()
+        self.state = self.initSystem()
         self._geometry_dirs: list[Path] = []
         self._anchor_names: set[str] = set()
         self._merged: dict[int, list[tuple[str, str]]] = {}
@@ -227,6 +234,15 @@ class OpenSimModel:
         self._player: Any | None = None
         self._player_window: Any | None = None
         _register_owner(self)
+
+    @property
+    def model(self) -> "OpenSimModel":
+        """Temporary internal alias for the model itself during migration.
+
+        Removed after all package call sites use the inherited OpenSim API
+        directly; it does not wrap or own another model.
+        """
+        return self
 
     def copy(self) -> "OpenSimModel":
         """Return an independent, deep copy of this model.
@@ -246,10 +262,10 @@ class OpenSimModel:
         """
         self._sync_coordinate_defaults()
 
-        clone = object.__new__(type(self))
+        clone = self.opensim.Model(self)
+        clone.__class__ = type(self)
         clone.__dict__.update(self.__dict__)
-        clone.model = self.model.clone()
-        clone.state = clone.model.initSystem()
+        clone.state = clone.initSystem()
         clone._geometry_dirs = list(self._geometry_dirs)
         clone._anchor_names = set(self._anchor_names)
         clone._merged = dict(self._merged)

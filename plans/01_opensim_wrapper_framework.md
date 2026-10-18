@@ -205,7 +205,7 @@ Regola di completezza: lo script di copertura elenca le classi native pubbliche 
 
 **Fase 3 – `OpenSimModel(opensim.Model)`** (ogni step lascia i test del suo ambito verdi)
 - **S30** – Creazione scheletro pacchetto (§5bis): cartelle `_internal/`, `core/`, `wrappers/`, `framework/`, `viz/` con `__init__.py` secondo le regole di esportazione; spostamento dei file privati in `_internal/` (`_geometry`, `_cad_import`, helper DLL/naming) con import interni aggiornati; `opensim_models/__init__.py` con star-import e `__all__` aggregato; `test_package_structure` verde sulle parti già migrate. · *Dip.*: S06, S03.
-- **S30A** – Nuova classe minimale `OpenSimModel(opensim.Model)` (`__init__`, `import_opensim`, `state`) in `core/`, senza rimuovere altro. · *Dip.*: S30.
+- **S30A** – Nuova classe minima `OpenSimModel(opensim.Model)` (`__init__`, `import_opensim`, `state`) in `model.py` durante la transizione, senza rimuovere altro; successivamente trasferita in `core/` con S30. · *Dip.*: S03.
 - **S31** – Migrazione lettura: property `bodies/joints/...`, `body()/joint()/...` su `self`; `core/` suddiviso per tema (`state`, `io`, `editing`, `viewing`) invece di un unico `model.py` da 3000+ righe. · *Dip.*: S30A, S23.
 - **S32** – Migrazione `update_state`, `reinitialize`, `structural_change`, `settle_under_gravity`. · *Dip.*: S31.
 - **S33** – Migrazione `copy()/clone()` → `type(self)`; `__add__/add_model/remove_model`. · *Dip.*: S32.

@@ -36,8 +36,12 @@ Esecuzione test (Windows, tmp di pytest non accessibile):
 - [x] S20-S22 generatore deterministico, wrapper `Body`, property getter e `set_*` per proprietà non-lista in staging privato `src/opensim_models/_generated/` (le liste attendono accessor dedicati; niente reinitialize automatico).
 - [x] S23 registry concreto + downcast/re-class per `Body`.
 - [x] S24 freschezza e test docstring/property; suite mirata 35 passati.
-- [ ] S25 stub campione.
+- [ ] S25 stub campione (tool Pylance MCP irraggiungibile; generatore stub alternativo da predisporre).
 - [ ] S26 stub completi.
+
+## Fase 3 – modello nativo
+- [ ] S30 struttura fisica modulare (`core/`, `_internal/`, `viz/`); top-level esistente resta stabile finché la migrazione non è completa.
+- [x] S30A `OpenSimModel` eredita direttamente da `opensim.Model`; 2 test nuovi mirati verdi.
 
 ## Note operative
 - I wrapper sono temporaneamente nel package privato `_generated` per evitare collisioni con i wrapper legacy in `components`; vanno spostati/esposti quando la migrazione (S39) li sostituisce.
