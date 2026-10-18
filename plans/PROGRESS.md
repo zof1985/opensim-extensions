@@ -21,9 +21,9 @@ Esecuzione test (Windows, tmp di pytest non accessibile):
 - [x] S01 spike re-class
 - [x] S02 spike ownership/GC
 - [x] S03 spike polimorfismo + decisione
-- [ ] S04 tabella conflitti nomi
-- [ ] S05 layout pacchetto
-- [ ] S06 test struttura/esportazioni
+- [x] S04 tabella conflitti nomi (`scripts/check_name_conflicts.py`: nessun conflitto tra API attuale di OpenSimModel/User e opensim.Model)
+- [x] S05 layout pacchetto (`plans/PACKAGE_LAYOUT.md`)
+- [x] S06 `tests/test_package_structure.py` verde (26); `__all__` aggregato nel top-level e in `models/`. Pylance su `[*mod.__all__]` da verificare in S112 (fallback: forma letterale generata); `scripts/check_exports.py` sostituito dal test.
 
 ## Fasi successive
 Vedi piano §7.2 (S10…S13A). Aggiungere qui le righe man mano che gli step diventano attivi.
