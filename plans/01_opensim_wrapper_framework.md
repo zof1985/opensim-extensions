@@ -195,9 +195,9 @@ Regola di completezza: lo script di copertura elenca le classi native pubbliche 
 - **S14** – Test schema (`tests/test_schema.py`). · *Dip.*: S13.
 
 **Fase 2 – Generatore e stub**
-- **S20** – Generatore: template di **una** classe (`Body`) con docstring NumPy, senza property; l'output va in `wrappers/<area>/<modulo>.py` con `__all__` e `__init__.py` di area generati secondo §5bis (il generatore rimuove i file orfani). · *Dip.*: S14, S03, S06.
-- **S21** – Template property (getter tipizzato + conversioni `Vec3`/liste). · *Dip.*: S20.
-- **S22** – Template `set_*` (+ `reinitialize`, `Self`) e metodi lista (`append_`, `clear_`, `set_<name>_at`). · *Dip.*: S21, S04.
+- **S20** – Generatore: template di **una** classe (`Body`) con docstring NumPy; l'output viene tenuto in `src/opensim_models/_generated/` (staging privato, per non collidere con `components.Body` legacy) e spostato in `wrappers/<area>/` alla migrazione S39. Genera `__all__` e `__init__.py` (S06). · *Dip.*: S14, S03, S06.
+- **S21** – Template property per proprietà scalari e oggetto non-lista (getter tipizzato); tipi OpenSim sono mantenuti come tipi nativi per evitare conversioni implicite con perdita di semantica. Proprietà-lista e conversioni NumPy vengono abilitate solo dopo test mirati per tipo. · *Dip.*: S20.
+- **S22** – Template `set_*` letterali; il setter chiama il metodo SWIG non sovrascritto tramite la classe nativa (evita ricorsione). Nessun `reinitialize` automatico: un componente re-class non conserva in modo affidabile il proprietario modello e il chiamante re-inizializza il modello esplicitamente se necessario. Proprietà-lista escluse finché non sono implementati/testati gli accessor indicizzati (`append_`, `clear_`, `set_<name>_at`). · *Dip.*: S21, S04.
 - **S23** – Mappa `classe nativa → wrapper` + funzione di re-class (secondo S03). · *Dip.*: S22.
 - **S24** – Test di freschezza dei generati + test qualità docstring NumPy. · *Dip.*: S23.
 - **S25** – `generate_opensim_stubs.py`: stub di 5 classi campione (`Model`, `Body`, `Joint`, `Coordinate`, `Force`) + `stubPath`. · *Dip.*: S14.

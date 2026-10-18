@@ -25,5 +25,20 @@ Esecuzione test (Windows, tmp di pytest non accessibile):
 - [x] S05 layout pacchetto (`plans/PACKAGE_LAYOUT.md`)
 - [x] S06 `tests/test_package_structure.py` verde (26); `__all__` aggregato nel top-level e in `models/`. Pylance su `[*mod.__all__]` da verificare in S112 (fallback: forma letterale generata); `scripts/check_exports.py` sostituito dal test.
 
-## Fasi successive
-Vedi piano §7.2 (S10…S13A). Aggiungere qui le righe man mano che gli step diventano attivi.
+## Fase 1 – Schema
+- [x] S10 classi e gerarchia: 639 classi pubbliche non-Moco in `scripts/_opensim_schema.json` (OpenSim 4.6).
+- [x] S11 proprietà, tipi, lista e commenti; `Body.mass` verificata.
+- [x] S12 metodi dichiarati e socket/input/output; `PinJoint` verificata.
+- [x] S13 docstring disponibili da SWIG e commenti Property (Doxygen non presente nell'ambiente).
+- [x] S14 `tests/test_schema.py`: 6 passati.
+
+## Fase 2 – Generazione wrappers
+- [x] S20-S22 generatore deterministico, wrapper `Body`, property getter e `set_*` per proprietà non-lista in staging privato `src/opensim_models/_generated/` (le liste attendono accessor dedicati; niente reinitialize automatico).
+- [x] S23 registry concreto + downcast/re-class per `Body`.
+- [x] S24 freschezza e test docstring/property; suite mirata 35 passati.
+- [ ] S25 stub campione.
+- [ ] S26 stub completi.
+
+## Note operative
+- I wrapper sono temporaneamente nel package privato `_generated` per evitare collisioni con i wrapper legacy in `components`; vanno spostati/esposti quando la migrazione (S39) li sostituisce.
+- I metodi setter generati chiamano il metodo SWIG non sovrascritto esplicitamente (`opensim.Body.set_mass(self, value)`) per evitare ricorsione.
