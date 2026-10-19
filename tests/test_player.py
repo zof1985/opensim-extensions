@@ -6,19 +6,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from opensim_models import OpenSimModel
-
-# DEFAULT_MODEL_PATH is User's internal default, reused here as a real .osim
+from opensim_extensions.opensim import register_geometry_search_path
+# DEFAULT_MODEL_PATH is User's bundled model, reused here as a real .osim
 # fixture with both a rotational (hip_flexion_r) and a translational
 # (pelvis_tx) coordinate, to test MotionData's unit handling.
-from opensim_models.models.user.user import DEFAULT_MODEL_PATH
-from opensim_models._gui.player import MotionData, MotionPlayer
+from opensim_extensions.models.user.user import DEFAULT_MESHES_DIR, DEFAULT_MODEL_PATH
+from opensim_extensions.viewer.player import MotionData, MotionPlayer
 
 opensim = pytest.importorskip("opensim")
 
 
 def make_model():
-    return OpenSimModel(model_path=DEFAULT_MODEL_PATH)
+    register_geometry_search_path(opensim, DEFAULT_MESHES_DIR)
+    model = opensim.Model(str(DEFAULT_MODEL_PATH))
+    model.initSystem()
+    return model
 
 
 def make_table(column_names, times, rows, *, in_degrees=True):

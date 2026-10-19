@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "opensim-models"
+name = "opensim-extensions"
 version = "6"
-description = "Composable OpenSim models, including an ANSUR II anthropometric user"
+description = "Frameworks, anthropometric users, and visualization for OpenSim"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -20,18 +20,14 @@ dependencies = [
 
 [project.optional-dependencies]
 opensim = ["opensim"]
-cad = ["pythonocc-core"]
 test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-opensim_models = ["models/user/assets/*", "models/user/assets/meshes/*"]
+opensim_extensions = ["models/user/assets/*", "models/user/assets/meshes/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-
-[tool.pyright]
-stubPath = "typings"

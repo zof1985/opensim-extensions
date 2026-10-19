@@ -1,10 +1,18 @@
 import numpy as np
 import pytest
 
-from opensim_models import OpenSimModel, save_animation
-from opensim_models.models.user.user import DEFAULT_MODEL_PATH
-
 opensim = pytest.importorskip("opensim")
+
+from opensim_extensions import save_animation
+from opensim_extensions.models.user.user import DEFAULT_MESHES_DIR, DEFAULT_MODEL_PATH
+from opensim_extensions.opensim import register_geometry_search_path
+
+
+def make_model():
+    register_geometry_search_path(opensim, DEFAULT_MESHES_DIR)
+    model = opensim.Model(str(DEFAULT_MODEL_PATH))
+    model.initSystem()
+    return model
 
 
 class FakeWriter:
@@ -28,17 +36,15 @@ def make_motion():
     return table
 
 
-@pytest.mark.parametrize("as_native_model", [False, True])
 def test_save_animation_renders_sto_offscreen_and_restores_pose(
-    monkeypatch, tmp_path, as_native_model
+    monkeypatch, tmp_path
 ):
     import imageio
-    import opensim_models._gui.visualizer as visualizer_module
+    import opensim_extensions.viewer.visualizer as visualizer_module
 
-    wrapped_model = OpenSimModel(model_path=DEFAULT_MODEL_PATH)
-    model = wrapped_model.model if as_native_model else wrapped_model
-    raw_model = model if as_native_model else model.model
-    state = raw_model.initSystem() if as_native_model else model.state
+    model = make_model()
+    raw_model = model
+    state = model.getWorkingState()
     coordinate = raw_model.getCoordinateSet().get("hip_flexion_r")
     original_value = coordinate.getValue(state)
     writer = FakeWriter()
@@ -126,9 +132,9 @@ def test_save_animation_renders_sto_offscreen_and_restores_pose(
 
 def test_save_animation_accepts_sto_path(monkeypatch, tmp_path):
     import imageio
-    import opensim_models._gui.visualizer as visualizer_module
+    import opensim_extensions.viewer.visualizer as visualizer_module
 
-    model = OpenSimModel(model_path=DEFAULT_MODEL_PATH)
+    model = make_model()
     table = make_motion()
     sto_path = tmp_path / "motion.sto"
     opensim.STOFileAdapter.write(table, str(sto_path))
@@ -156,7 +162,7 @@ def test_save_animation_accepts_sto_path(monkeypatch, tmp_path):
 
 
 def test_save_animation_rejects_table_without_matching_coordinates(tmp_path):
-    model = OpenSimModel(model_path=DEFAULT_MODEL_PATH)
+    model = make_model()
     table = opensim.TimeSeriesTable()
     table.setColumnLabels(["not_a_coordinate"])
     table.appendRow(0.0, opensim.RowVector([0.0]))
@@ -167,7 +173,7 @@ def test_save_animation_rejects_table_without_matching_coordinates(tmp_path):
 
 
 def test_save_animation_rejects_invalid_size(tmp_path):
-    model = OpenSimModel(model_path=DEFAULT_MODEL_PATH)
+    model = make_model()
 
     with pytest.raises(ValueError, match="positive integers"):
         save_animation(model, make_motion(), tmp_path / "motion.mp4", size=(640, 0))
@@ -177,14 +183,14 @@ def test_save_animation_rejects_invalid_size(tmp_path):
 
 
 def test_save_animation_requires_mp4_path(tmp_path):
-    model = OpenSimModel(model_path=DEFAULT_MODEL_PATH)
+    model = make_model()
 
     with pytest.raises(ValueError, match=".mp4 extension"):
         save_animation(model, make_motion(), tmp_path / "motion.avi")
 
 
 def test_save_animation_rejects_invalid_camera_vector(tmp_path):
-    model = OpenSimModel(model_path=DEFAULT_MODEL_PATH)
+    model = make_model()
 
     with pytest.raises(ValueError, match="camera_position"):
         save_animation(
@@ -196,7 +202,7 @@ def test_save_animation_rejects_invalid_camera_vector(tmp_path):
 
 
 def test_save_animation_rejects_non_boolean_visibility_option(tmp_path):
-    model = OpenSimModel(model_path=DEFAULT_MODEL_PATH)
+    model = make_model()
 
     with pytest.raises(TypeError, match="show_ground must be a boolean"):
         save_animation(model, make_motion(), tmp_path / "motion.mp4", show_ground="yes")
