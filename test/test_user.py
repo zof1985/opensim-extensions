@@ -1,6 +1,5 @@
 import math
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -8,16 +7,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from opensim_models import OpenSimModel, User
+from opensim_extensions import User
 
-# User only exposes DEFAULT_DATASET/DEFAULT_MESHES_DIR/load_ansur/resolve_reference
-# internally; tests reach into the implementation modules directly to exercise them.
-from opensim_models.models.user._data import DEFAULT_DATASET, load_ansur, resolve_reference
-from opensim_models.models.user.user import (
+# Tests use the resolved dataset directly to exercise ANSUR interpolation.
+from opensim_extensions.models.user.data import (
+    DEFAULT_DATASET,
+    load_ansur,
+    resolve_reference,
+)
+from opensim_extensions.models.user.user import (
     DEFAULT_MESHES_DIR,
     _FOOT_MARKER_NAMES,
     _JOINT_CENTER_NAMES,
-    _POSTURE_COORDINATE_NAMES,
+)
+from opensim_extensions.models.user.posture_table import (
+    POSTURE_COORDINATE_NAMES as _POSTURE_COORDINATE_NAMES,
 )
 
 try:
@@ -225,6 +229,15 @@ def test_anthropometry_property_matches_the_resolved_reference():
     assert user.anthropometry.height_cm == pytest.approx(user.height)
 
 
+def test_user_has_no_generic_from_osim_constructor():
+    assert not hasattr(User, "from_osim")
+
+
+def test_user_does_not_accept_a_generic_model_path():
+    with pytest.raises(TypeError, match="model_path"):
+        User("M", model_path="not-used.osim")
+
+
 @requires_opensim
 def test_gender_only_accepts_m_or_f():
     with pytest.raises(ValueError, match="gender"):
@@ -232,25 +245,11 @@ def test_gender_only_accepts_m_or_f():
 
 
 @requires_opensim
-def test_instances_are_backed_by_independent_opensim_models():
+def test_instances_are_backed_by_independent_opensim_extensions():
     user_50 = make_user(gender="M", percentile=50)
     user_75 = make_user(gender="M", percentile=75)
 
-    assert user_50.model is not user_75.model
-
-
-@requires_opensim
-def test_copy_preserves_type_and_anthropometry_without_a_user_override():
-    user = make_user(gender="F", percentile=75.0)
-    user.set_left_knee_flexionextension(90.0)
-
-    duplicate = user.copy()
-
-    assert type(duplicate) is User
-    assert duplicate.gender == "F"
-    assert duplicate.percentile == 75.0
-    assert duplicate.coordinate("knee_angle_l").value_degrees == pytest.approx(90.0)
-    assert duplicate.model is not user.model
+    assert user_50 is not user_75
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +263,7 @@ def test_default_mass_matches_the_resolved_ansur_weight_kg():
     reference = resolve_reference("M", height=180.0, dataset=DATASET)
 
     assert user.mass_kg == pytest.approx(reference.values["weight_kg"])
-    assert user.model.getTotalMass(user.state) == pytest.approx(user.mass_kg)
+    assert user.getTotalMass(user.state) == pytest.approx(user.mass_kg)
 
 
 @requires_opensim
@@ -276,7 +275,7 @@ def test_explicit_mass_kg_overrides_the_ansur_default():
     # have produced, otherwise this test would not exercise the override.
     assert default_user.mass_kg != pytest.approx(120.0)
     assert heavy_user.mass_kg == pytest.approx(120.0)
-    assert heavy_user.model.getTotalMass(heavy_user.state) == pytest.approx(120.0)
+    assert heavy_user.getTotalMass(heavy_user.state) == pytest.approx(120.0)
 
 
 @requires_opensim
@@ -299,8 +298,13 @@ def test_mass_kg_rescales_every_body_mass_by_the_same_factor():
     heavy_user = make_user(gender="M", height_cm=180.0, mass_kg=200.0)
     expected_factor = 200.0 / default_user.mass_kg
 
-    for name in default_user.bodies:
-        ratio = heavy_user.body(name).mass / default_user.body(name).mass
+    bodies = default_user.getBodySet()
+    for index in range(bodies.getSize()):
+        name = bodies.get(index).getName()
+        ratio = (
+            heavy_user.getBodySet().get(name).getMass()
+            / default_user.getBodySet().get(name).getMass()
+        )
         assert ratio == pytest.approx(expected_factor)
 
 
@@ -312,23 +316,13 @@ def test_mass_kg_rejects_non_positive_or_non_finite_values(mass_kg):
 
 
 @requires_opensim
-def test_copy_preserves_mass_kg():
-    user = make_user(gender="M", height_cm=180.0, mass_kg=95.0)
-
-    duplicate = user.copy()
-
-    assert duplicate.mass_kg == pytest.approx(95.0)
-    assert duplicate.model.getTotalMass(duplicate.state) == pytest.approx(95.0)
-
-
-@requires_opensim
 def test_set_mass_kg_recalibrates_an_already_built_user():
     user = make_user(gender="M", height_cm=180.0)
 
     user.set_mass_kg(130.0)
 
     assert user.mass_kg == pytest.approx(130.0)
-    assert user.model.getTotalMass(user.state) == pytest.approx(130.0)
+    assert user.getTotalMass(user.state) == pytest.approx(130.0)
 
 
 @requires_opensim
@@ -341,8 +335,8 @@ def test_set_mass_kg_is_idempotent_and_works_from_either_starting_point():
 
     assert default_user.mass_kg == pytest.approx(75.0)
     assert explicit_user.mass_kg == pytest.approx(75.0)
-    assert default_user.model.getTotalMass(default_user.state) == pytest.approx(75.0)
-    assert explicit_user.model.getTotalMass(explicit_user.state) == pytest.approx(75.0)
+    assert default_user.getTotalMass(default_user.state) == pytest.approx(75.0)
+    assert explicit_user.getTotalMass(explicit_user.state) == pytest.approx(75.0)
 
 
 @requires_opensim
@@ -375,11 +369,11 @@ def test_set_mass_kg_rejects_non_positive_or_non_finite_values(mass_kg):
 def test_model_components_match_the_bundled_rajagopal_model():
     user = make_user(gender="M", percentile=75.0)
 
-    assert len(user.bodies) == 22
-    assert len(user.joints) == 22
-    assert len(user.muscles) == 80
-    assert len(user.markers) == 66
-    assert len(user.coordinates) == 39
+    assert user.getBodySet().getSize() == 22
+    assert user.getJointSet().getSize() == 22
+    assert user.getMuscles().getSize() == 80
+    assert user.getMarkerSet().getSize() == 66
+    assert user.getCoordinateSet().getSize() == 39
 
 
 @requires_opensim
@@ -387,19 +381,24 @@ def test_scaling_moves_markers_away_from_the_unscaled_baseline():
     baseline_user = make_user(gender="M", percentile=50.0)
     scaled_user = make_user(gender="M", percentile=95.0)
 
-    baseline = baseline_user.marker("RTOE").location
-    scaled = scaled_user.marker("RTOE").location
+    baseline_marker = baseline_user.getMarkerSet().get("RTOE")
+    scaled_marker = scaled_user.getMarkerSet().get("RTOE")
+    baseline = baseline_marker.getLocationInGround(baseline_user.state)
+    scaled = scaled_marker.getLocationInGround(scaled_user.state)
 
-    assert scaled != pytest.approx(baseline)
+    assert tuple(scaled.get(index) for index in range(3)) != pytest.approx(
+        tuple(baseline.get(index) for index in range(3))
+    )
 
 
 @requires_opensim
 def test_originally_locked_coordinates_are_unlocked_for_full_configurability():
     user = make_user(gender="F")
 
-    assert user.coordinate("subtalar_angle_l").locked is False
-    assert user.coordinate("mtp_angle_r").locked is False
-    assert user.coordinate("wrist_flex_r").locked is False
+    coordinates = user.getCoordinateSet()
+    assert coordinates.get("subtalar_angle_l").get_locked() is False
+    assert coordinates.get("mtp_angle_r").get_locked() is False
+    assert coordinates.get("wrist_flex_r").get_locked() is False
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +413,8 @@ def test_every_posture_setter_writes_its_target_coordinate(setter_name, coordina
 
     getattr(user, setter_name)(12.0)
 
-    assert user.coordinate(coordinate_name).value_degrees == pytest.approx(12.0)
+    coordinate = user.getCoordinateSet().get(coordinate_name)
+    assert np.rad2deg(coordinate.getValue(user.state)) == pytest.approx(12.0)
 
 
 @requires_opensim
@@ -424,10 +424,11 @@ def test_posture_setters_do_not_cross_talk_between_sides():
     user.set_left_knee_flexionextension(10.0)
     user.set_right_hip_flexionextension(25.0)
 
-    assert user.coordinate("knee_angle_l").value_degrees == pytest.approx(10.0)
-    assert user.coordinate("knee_angle_r").value_degrees == pytest.approx(0.0)
-    assert user.coordinate("hip_flexion_r").value_degrees == pytest.approx(25.0)
-    assert user.coordinate("hip_flexion_l").value_degrees == pytest.approx(0.0)
+    coordinates = user.getCoordinateSet()
+    assert np.rad2deg(coordinates.get("knee_angle_l").getValue(user.state)) == pytest.approx(10.0)
+    assert np.rad2deg(coordinates.get("knee_angle_r").getValue(user.state)) == pytest.approx(0.0)
+    assert np.rad2deg(coordinates.get("hip_flexion_r").getValue(user.state)) == pytest.approx(25.0)
+    assert np.rad2deg(coordinates.get("hip_flexion_l").getValue(user.state)) == pytest.approx(0.0)
 
 
 def test_posture_properties_mirror_every_posture_setter():
@@ -444,7 +445,9 @@ def test_posture_properties_mirror_every_posture_setter():
 def test_posture_angle_property_reads_back_the_coordinate(property_name, coordinate_name):
     user = make_user(gender="F")
 
-    user.coordinate(coordinate_name).set_value_degrees(12.0)
+    user.getCoordinateSet().get(coordinate_name).setValue(
+        user.state, np.deg2rad(12.0), False
+    )
 
     assert getattr(user, property_name) == pytest.approx(12.0)
 
@@ -459,7 +462,7 @@ def test_posture_angle_property_reads_back_the_coordinate(property_name, coordin
 def test_joint_center_property_matches_the_opensim_joint_position(property_name, joint_name):
     user = make_user(gender="M")
 
-    frame = user.joint(joint_name).raw.getChildFrame()
+    frame = user.getJointSet().get(joint_name).getChildFrame()
     expected = frame.getPositionInGround(user.state)
 
     assert getattr(user, property_name) == pytest.approx(
@@ -493,7 +496,7 @@ def test_joint_center_reflects_posture_without_calling_update_state():
 def test_foot_marker_property_matches_the_opensim_marker_location(property_name, marker_name):
     user = make_user(gender="M")
 
-    expected = user.marker(marker_name).raw.getLocationInGround(user.state)
+    expected = user.getMarkerSet().get(marker_name).getLocationInGround(user.state)
 
     assert getattr(user, property_name) == pytest.approx(
         (expected.get(0), expected.get(1), expected.get(2))
@@ -610,36 +613,6 @@ def test_cop_is_the_vertical_projection_of_com_onto_the_ground():
 
 
 @requires_opensim
-def test_set_position_moves_the_reference_point_to_the_target():
-    user = make_user(gender="M")
-
-    user.set_position(user.cop, 1.0, 0.0, 0.5)
-
-    assert user.cop == pytest.approx((1.0, 0.0, 0.5))
-
-
-@requires_opensim
-def test_set_position_is_a_rigid_translation_that_preserves_posture():
-    user = make_user(gender="M")
-    user.set_right_knee_flexionextension(30.0)
-    angle_before = user.right_knee_flexionextension
-    thigh_length_before = user.right_thigh_length
-
-    user.set_position(user.com, 3.0, 0.0, -1.0)
-
-    assert user.right_knee_flexionextension == pytest.approx(angle_before)
-    assert user.right_thigh_length == pytest.approx(thigh_length_before)
-
-
-@requires_opensim
-def test_set_position_rejects_non_finite_target():
-    user = make_user(gender="M")
-
-    with pytest.raises(ValueError, match="finite"):
-        user.set_position(user.com, float("nan"), 0.0, 0.0)
-
-
-@requires_opensim
 def test_out_of_range_height_user_builds_with_positive_derived_measurements():
     with pytest.warns(UserWarning, match="outside ANSUR range"):
         user = make_user(gender="F", height_cm=210.0)
@@ -655,65 +628,9 @@ def test_out_of_range_height_user_builds_with_positive_derived_measurements():
         assert getattr(user, name) > 0
 
 
-# ---------------------------------------------------------------------------
-# Inherited OpenSimModel facade, exercised through User
-# ---------------------------------------------------------------------------
-
-
 @requires_opensim
-def test_inherited_coordinate_locking_is_enforced():
-    user = make_user(gender="M")
-
-    user.coordinate("knee_angle_r").set_locked(True)
-    with pytest.raises(ValueError, match="locked"):
-        user.coordinate("knee_angle_r").set_value_degrees(10.0)
-
-
-@requires_opensim
-def test_inherited_marker_and_muscle_accessors_work():
-    user = make_user(gender="M")
-
-    user.marker("RTOE").set_location((0.1, 0.02, 0.03))
-    user.muscle("addbrev_r").set_max_isometric_force(1500.0)
-
-    assert user.marker("RTOE").location == pytest.approx((0.1, 0.02, 0.03))
-    assert user.muscle("addbrev_r").max_isometric_force == pytest.approx(1500.0)
-
-
-@requires_opensim
-def test_export_writes_a_reloadable_osim_file_with_current_posture():
-    user = make_user(gender="M", percentile=75.0)
-    user.set_right_hip_flexionextension(25.0)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        destination = user.export(Path(tmp_dir) / "exported.osim")
-
-        assert destination.is_file()
-        reloaded = opensim.Model(str(destination))
-        reloaded.initSystem()
-        hip_flexion_r = reloaded.getCoordinateSet().get("hip_flexion_r")
-        assert hip_flexion_r.get_default_value() == pytest.approx(np.deg2rad(25.0))
-
-
-# ---------------------------------------------------------------------------
-# Rendering assets and composition with other OpenSimModel instances
-# ---------------------------------------------------------------------------
-
-
-@requires_opensim
-def test_user_registers_its_own_mesh_directory_for_show():
+def test_user_registers_its_own_mesh_directory_for_viewer():
     user = make_user(gender="M")
 
     assert DEFAULT_MESHES_DIR in user.geometry_directories
     assert user.visualizer is None
-
-
-@requires_opensim
-def test_adding_two_users_degrades_to_a_generic_opensimmodel():
-    user_a = make_user(gender="M")
-    user_b = make_user(gender="F")
-
-    combined = user_a + user_b
-
-    assert type(combined) is OpenSimModel
-    assert len(combined.bodies) == len(user_a.bodies) + len(user_b.bodies) == 44

@@ -1,8 +1,0 @@
-inDegrees=yes
-DataType=double
-version=3
-OpenSimVersion=4.6-2026-03-31-d6972f9e6
-endheader
-time	/jointset/hip_r/hip_flexion_r/value
-1	0
-1.5	90
