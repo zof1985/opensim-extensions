@@ -26,7 +26,7 @@ test = ["pytest>=8"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-opensim_extensions = ["models/user/assets/*", "models/user/assets/meshes/*"]
+opensim_extensions = ["models/user/assets/*", "models/user/assets/meshes/*", "bodies/assets/meshes/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

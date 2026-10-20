@@ -1,6 +1,7 @@
 """Specialized native OpenSim models."""
 
-from . import user
+from . import bike, user
+from .bike import *
 from .user import *
 
-__all__ = [*user.__all__]
+__all__ = [*bike.__all__, *user.__all__]

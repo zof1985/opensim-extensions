@@ -28,6 +28,8 @@ def test_every_public_module_has_an_explicit_clean_all():
 def test_top_level_api_contains_only_requested_public_elements():
     assert set(opensim_extensions.__all__) == {
         "Framework",
+        "Bike",
+        "IRON_DENSITY_KG_M3",
         "User",
         "save_animation",
         "VTKViewer",
