@@ -104,7 +104,7 @@ def test_save_snapshot_writes_vector_svg_for_model_and_framework(tmp_path):
     model = make_pin_model()
     viewer = VTKViewer()
 
-    result = viewer.save_snapshot(model, path=tmp_path / "model.svg")
+    result = viewer.save_snapshot(model, path=tmp_path / "model.svg", dpi=0)
     viewer.save_snapshot(Framework({"member": model}), path=tmp_path / "fw.svg")
 
     assert result == tmp_path / "model.svg"
@@ -113,11 +113,43 @@ def test_save_snapshot_writes_vector_svg_for_model_and_framework(tmp_path):
         assert text.startswith("<?xml") and "<polygon" in text and "<image" not in text
 
 
-def test_save_snapshot_rejects_non_svg_and_frame_without_motion(tmp_path):
+def test_save_snapshot_writes_png_with_default_and_custom_dpi(tmp_path):
+    from PIL import Image
+
     model = make_pin_model()
     viewer = VTKViewer()
-    with pytest.raises(ValueError, match=".svg"):
-        viewer.save_snapshot(model, path=tmp_path / "pose.png")
+
+    default_path = viewer.save_snapshot(
+        model, path=tmp_path / "default.png", size=(160, 120)
+    )
+    custom_path = viewer.save_snapshot(
+        model, path=str(tmp_path / "custom.PNG"), size=(160, 120), dpi=150
+    )
+
+    assert default_path == tmp_path / "default.png"
+    assert custom_path == tmp_path / "custom.PNG"
+    for path, expected_dpi in ((default_path, 300), (custom_path, 150)):
+        with Image.open(path) as image:
+            assert image.format == "PNG"
+            assert image.size == (160, 120)
+            assert image.info["dpi"] == pytest.approx(
+                (expected_dpi, expected_dpi), abs=0.02
+            )
+
+
+def test_save_snapshot_rejects_unsupported_extensions_and_frame_without_motion(
+    tmp_path,
+):
+    model = make_pin_model()
+    viewer = VTKViewer()
+    with pytest.raises(ValueError, match=r"\.svg or \.png"):
+        viewer.save_snapshot(model, path=tmp_path / "pose.jpg")
+    with pytest.raises(ValueError, match="positive integer"):
+        viewer.save_snapshot(model, path=tmp_path / "pose.png", dpi=0)
+    with pytest.raises(ValueError, match="positive integer"):
+        viewer.save_snapshot(model, path=tmp_path / "pose.png", dpi=300.5)
+    with pytest.raises(ValueError, match="positive integer"):
+        viewer.save_snapshot(model, path=tmp_path / "pose.png", dpi=True)
     with pytest.raises(ValueError, match="require a motion"):
         viewer.save_snapshot(model, frame=3, path=tmp_path / "pose.svg")
     with pytest.raises(TypeError):

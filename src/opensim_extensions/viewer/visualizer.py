@@ -364,10 +364,12 @@ class VTKVisualizer:
     def _build_actors(self) -> None:
         opensim = self._model.opensim
         model_name = self._model_display_name()
-        body_set = self._model.getBodySet()
-        for index in range(body_set.getSize()):
-            body = body_set.get(index)
-            self._add_body_actors(body, model_name, opensim)
+        # Geometry may be attached to a body or to a PhysicalOffsetFrame
+        # nested in it (as bodies.attach_shapes does), so scan every frame.
+        for component in self._model.getComponentsList():
+            frame = opensim.PhysicalFrame.safeDownCast(component)
+            if frame is not None:
+                self._add_body_actors(frame, model_name, opensim)
 
     def _add_body_actors(self, body: Any, model_name: str, opensim: Any) -> None:
         geometry_property = body.getPropertyByName("attached_geometry")

@@ -57,6 +57,17 @@ def mass_properties(
 def attach_shapes(body, shapes: Sequence[Shape], prefix: str | None = None) -> None:
     """Attach each shape to ``body`` as visible geometry on its own offset frame."""
     prefix = prefix or body.getName()
+    previous_level = opensim.Logger.getLevelString()
+    # OpenSim logs a harmless "Mesh ... not connected to a model" error while a
+    # mesh is attached to a body that is not yet part of a model; it loads later.
+    opensim.Logger.setLevelString("Off")
+    try:
+        _attach_shapes(body, shapes, prefix)
+    finally:
+        opensim.Logger.setLevelString(previous_level)
+
+
+def _attach_shapes(body, shapes: Sequence[Shape], prefix: str) -> None:
     for index, shape in enumerate(shapes):
         frame = opensim.PhysicalOffsetFrame()
         frame.setName(f"{prefix}_shape{index}")

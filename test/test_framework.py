@@ -159,6 +159,17 @@ def test_merge_to_model_clones_members_and_resolves_component_name_collisions():
     assert first.getBodySet().getSize() == second.getBodySet().getSize() == 1
 
 
+def test_merge_to_model_carries_member_meshes(tmp_path):
+    from opensim_extensions.bodies.shapes import MESHES_DIR
+
+    member = make_single_body_model()
+    member.geometry_directories = (tmp_path,)
+    merged = Framework({"first": member, "other": make_single_body_model()}).merge_to_model()
+
+    assert tmp_path in merged.geometry_directories
+    assert MESHES_DIR in merged.geometry_directories
+
+
 def test_composite_is_a_fresh_snapshot_with_coordinate_path_mappings():
     member = make_pin_model()
     framework = Framework({"arm": member})

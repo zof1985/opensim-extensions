@@ -5,9 +5,11 @@ from __future__ import annotations
 import keyword
 from collections.abc import Iterable, Mapping, Sequence
 from math import isclose, isfinite
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Self, TypeGuard
 
+from ..bodies.shapes import MESHES_DIR
 from ..opensim import import_opensim
 from .couplings import ComponentRef, Coupling, normalize_reference
 
@@ -815,6 +817,21 @@ class Framework(dict[str, opensim.Model]):
             else []
         )
         merged, paths = self._build_merge(name, members, couplings)
+        # Meshes live in the members' directories; keep them reachable by the viewer.
+        merged.geometry_directories = tuple(
+            dict.fromkeys(
+                [
+                    *(
+                        Path(directory)
+                        for member in members
+                        for directory in getattr(
+                            dict.__getitem__(self, member), "geometry_directories", ()
+                        )
+                    ),
+                    MESHES_DIR,
+                ]
+            )
+        )
         if return_mapping:
             return merged, paths
         return merged

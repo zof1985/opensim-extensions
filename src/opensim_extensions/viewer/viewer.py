@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from ..animation import save_animation as _render_animation
+from ..bodies.shapes import MESHES_DIR
 from ..framework import Framework
-from ..opensim import import_opensim
+from ..opensim import import_opensim, resolve_geometry_file
+from .export import save_image as _save_image
 from .player import MotionData, PlayerWindow, _apply_time, start_player
 from .visualizer import DEFAULT_SIZE, VTKVisualizer
 
@@ -23,7 +25,10 @@ class _ViewerModel:
         if state is None:
             state = getattr(model, "state", None)
         self.state = state if state is not None else model.initSystem()
-        self._geometry_dirs = tuple(getattr(model, "geometry_directories", ()))
+        self._geometry_dirs = (
+            *getattr(model, "geometry_directories", ()),
+            MESHES_DIR,
+        )
         self._visualizer = None
 
     def __getattr__(self, name: str) -> Any:
@@ -40,15 +45,9 @@ class _ViewerModel:
             self.model._visualizer = value
 
     def _resolve_geometry_file(self, filename: str) -> Path | None:
-        for directory in self._geometry_dirs:
-            candidate = Path(directory) / filename
-            if candidate.is_file():
-                return candidate
-        try:
-            resolved = self.opensim.ModelVisualizer.findGeometryFile(filename)
-        except RuntimeError:
-            return None
-        return Path(str(resolved)) if resolved else None
+        return resolve_geometry_file(
+            self.opensim, self.model, filename, self._geometry_dirs
+        )
 
 
 class VTKViewer:
@@ -123,8 +122,9 @@ class VTKViewer:
         *,
         motion: Any = None,
         size: tuple[int, int] = DEFAULT_SIZE,
+        dpi: int = 300,
     ) -> Path:
-        """Save the posed model as an SVG image, without opening a window.
+        """Save the posed model as an SVG or PNG image, without opening a window.
 
         Parameters
         ----------
@@ -135,13 +135,15 @@ class VTKViewer:
         time_s : float or None, default=0.0
             Time in seconds on ``motion`` to render (linearly interpolated).
         path : str or pathlib.Path
-            Destination; the extension must be ``.svg``.
+            Destination; the extension must be ``.svg`` or ``.png``.
         motion : str, pathlib.Path, opensim.TimeSeriesTable, or None, default=None
             Motion that ``frame`` and ``time_s`` refer to. Without a motion
             the model is rendered in its current posture, and ``frame`` and
             ``time_s`` must be ``None``, ``0`` or ``0.0``.
         size : tuple[int, int], default=DEFAULT_SIZE
-            Render size in pixels used to lay out the vector drawing.
+            Render size in pixels; sets PNG dimensions and SVG layout.
+        dpi : int, default=300
+            Resolution metadata for PNG output. Ignored for SVG output.
 
         Returns
         -------
@@ -151,14 +153,20 @@ class VTKViewer:
         Raises
         ------
         ValueError
-            If the extension is not ``.svg``, ``frame`` is out of range, or
-            ``frame``/``time_s`` is requested without a motion.
+            If the extension is not ``.svg`` or ``.png``, PNG ``dpi`` is not
+            a positive integer, ``frame`` is out of range, or ``frame``/
+            ``time_s`` is requested without a motion.
         TypeError
             If ``object`` or ``motion`` has an unsupported type.
         """
         destination = Path(path)
-        if destination.suffix.lower() != ".svg":
-            raise ValueError("path must have an .svg extension")
+        extension = destination.suffix.lower()
+        if extension not in {".svg", ".png"}:
+            raise ValueError("path must have a .svg or .png extension")
+        if extension == ".png" and (
+            not isinstance(dpi, int) or isinstance(dpi, bool) or dpi <= 0
+        ):
+            raise ValueError("dpi must be a positive integer for PNG output")
         model = self._native_model(object)
         meta = _ViewerModel(model)
         try:
@@ -183,7 +191,10 @@ class VTKViewer:
         destination.parent.mkdir(parents=True, exist_ok=True)
         visualizer = VTKVisualizer(meta, offscreen=True, size=size)
         try:
-            visualizer.save_svg(destination)
+            if extension == ".svg":
+                visualizer.save_svg(destination)
+            else:
+                _save_image(visualizer, destination, dpi=dpi)
         finally:
             visualizer.close()
         return destination

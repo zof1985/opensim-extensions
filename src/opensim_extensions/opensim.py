@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-__all__ = ["import_opensim", "register_geometry_search_path"]
+__all__ = ["import_opensim", "register_geometry_search_path", "resolve_geometry_file"]
 
 
 def _ensure_visualizer_dll_path() -> None:
@@ -26,6 +26,23 @@ def register_geometry_search_path(opensim: Any, directory: str | Path) -> None:
     opensim.ModelVisualizer.addDirToGeometrySearchPaths(
         str(Path(directory).expanduser().resolve())
     )
+
+
+def resolve_geometry_file(
+    opensim: Any, model: Any, filename: str, directories: Any = ()
+) -> Path | None:
+    """Locate a mesh file in ``directories`` or OpenSim's geometry search paths."""
+    for directory in directories:
+        candidate = Path(directory) / filename
+        if candidate.is_file():
+            return candidate
+    try:
+        resolved = opensim.ModelVisualizer.findGeometryFile(
+            model, filename, False, opensim.ArrayStr()
+        )
+    except (RuntimeError, TypeError):
+        return None
+    return Path(str(resolved)) if resolved else None
 
 
 def import_opensim() -> Any:

@@ -7,11 +7,12 @@ import warnings
 from typing import Any
 
 import numpy as np
-from scipy.optimize import least_squares, minimize, minimize_scalar
+from scipy.optimize import least_squares, minimize_scalar
 
-from ...bodies.shapes import euler_xyz_to_matrix, matrix_to_euler_xyz
+from ...bodies.shapes import matrix_to_euler_xyz
 from ...framework import Framework
 from ...opensim import import_opensim
+from .bike import _horn_direction
 
 __all__ = ["fit_user"]
 
@@ -20,6 +21,19 @@ opensim = import_opensim()
 _TOLERANCE_M = 5e-3
 _BOTTOM_ANGLES = np.radians(np.arange(0.0, 360.0, 1.0))
 _FLEXION_TARGET_DEG = 90.0
+_FOOT_AXIS_ALIGNMENT_WEIGHT = 0.038
+_FOOT_PLANE_ALIGNMENT_WEIGHT = 0.9
+_PRESERVED_POSTURE_COORDINATES = (
+    "neck_base_flexion",
+    "neck_base_lateral_flexion",
+    "neck_flexion",
+    "neck_lateral_flexion",
+    "neck_rotation",
+    "wrist_flex_r",
+    "wrist_dev_r",
+    "wrist_flex_l",
+    "wrist_dev_l",
+)
 
 
 def _pose(frame: Any, state: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -46,16 +60,16 @@ class _Rider:
         self.user = user
         self.coordinates = user.getCoordinateSet()
         self.initial_lumbar = self.coordinates.get("lumbar_extension").getValue(user.state)
+        self.initial_preserved_posture = {
+            name: self.coordinates.get(name).getValue(user.state)
+            for name in _PRESERVED_POSTURE_COORDINATES
+        }
         self.neutral()
         self.hip_offset = self._mid_hip() - self._pelvis_translation()
         self.foot = {}
         for side in ("r", "l"):
-            heel, toe, mt5 = (self.marker(f"{side.upper()}{name}") for name in ("CAL", "TOE", "MT5"))
             self.foot[side] = {
                 "neutral": self.body_rotation(f"calcn_{side}"),
-                # Height of the 5th metatarsal marker above the sole plane,
-                # tangent to the lowest foot marker in the neutral posture.
-                "mt5_height": float(mt5[1] - min(heel[1], toe[1], mt5[1])),
             }
         self.palm = {
             "r": float(user.right_palm_length),
@@ -86,6 +100,7 @@ class _Rider:
             name = self.coordinates.get(index).getName()
             if name not in keep:
                 values[name] = 0.0
+        values.update(self.initial_preserved_posture)
         self.set(values)
 
     def marker(self, name: str) -> np.ndarray:
@@ -159,71 +174,126 @@ def _multistart(residual, starts, lower, upper):
 
 
 class _LegFit:
-    """Sagittal-plane leg placement for one seat position."""
+    """Three-dimensional leg placement for one seat position."""
 
     def __init__(self, rider: _Rider, bike: Any, shoe: float):
         self.rider = rider
         self.shoe = shoe
         self.half_pedal = bike._pedal_size_mm[2] * 1e-3 / 2
-        self.axis = bike.crank_axis_position
+        self.axis = bike._crank_axis_position_m
         self.crank = bike._crank_length_mm * 1e-3
-
-    def _pedal_offset(self, side: str, pitch: float) -> np.ndarray:
-        height = self.half_pedal + self.shoe + self.rider.foot[side]["mt5_height"]
-        return np.array([-math.sin(pitch) * height, math.cos(pitch) * height])
+        self.lateral = bike._pedal_lateral_offset_m
+        self.half_pedal_width = bike._pedal_size_mm[1] * 1e-3 / 2
 
     def solve(self, hip_target: np.ndarray) -> dict[str, Any]:
         rider = self.rider
         rider.neutral()
         rider.place_pelvis(hip_target)
-        pedal_r = (self.axis + np.array([self.crank, 0.0, 0.0]))[:2]
-        pedal_l = (self.axis - np.array([self.crank, 0.0, 0.0]))[:2]
 
-        def right(q):
-            rider.set({"hip_flexion_r": q[0], "knee_angle_r": q[1], "ankle_angle_r": q[2]})
-            mt5 = rider.marker("RMT5")
-            pitch = _pitch(rider.body_rotation("calcn_r"), rider.foot["r"]["neutral"])
-            target = pedal_r + self._pedal_offset("r", 0.0)
-            return np.array([mt5[0] - target[0], mt5[1] - target[1], pitch])
+        def leg(side: str):
+            """Residual and coordinate names of one leg.
 
-        def left(q):
-            rider.set({"hip_flexion_l": q[0], "knee_angle_l": q[1], "ankle_angle_l": 0.0})
-            mt5 = rider.marker("LMT5")
-            pitch = _pitch(rider.body_rotation("calcn_l"), rider.foot["l"]["neutral"])
-            target = pedal_l + self._pedal_offset("l", pitch)
-            return np.array([mt5[0] - target[0], mt5[1] - target[1]])
+            The toe marker represents the medial/first-metatarsal landmark and
+            goes on the inner pedal edge. The toe/MT5 midpoint projects to the
+            pedal centre in its local plane. The sole plane is aligned with the
+            pedal's top plane, and the heel-to-forefoot axis with its
+            longitudinal axis. The subtalar coordinate can correct sole roll.
+            The left ankle is neutral: the left pedal takes the foot pitch.
+            """
+            sign = 1.0 if side == "r" else -1.0
+            names = [f"hip_flexion_{side}", f"hip_adduction_{side}", f"hip_rotation_{side}", f"knee_angle_{side}"]
+            names += [f"ankle_angle_{side}"] if side == "r" else []
+            names += [f"subtalar_angle_{side}"]
+            pedal = (self.axis + sign * np.array([self.crank, 0.0, 0.0]))[:2]
+            pedal_center_z = self.axis[2] + sign * (self.lateral - self.half_pedal_width)
+            inner_edge_z = pedal_center_z - sign * self.half_pedal_width
 
-        hip_r, knee_r, ankle_r = (rider.bounds(n) for n in ("hip_flexion_r", "knee_angle_r", "ankle_angle_r"))
-        hip_l, knee_l = (rider.bounds(n) for n in ("hip_flexion_l", "knee_angle_l"))
-        starts = [(h, k) for h in (0.6, 1.1, 1.6) for k in (0.8, 1.5, 2.1)]
-        sol_r = _multistart(
-            right,
-            [(h, k, 0.0) for h, k in starts],
-            np.array([hip_r[0], knee_r[0], ankle_r[0]]),
-            np.array([hip_r[1], knee_r[1], ankle_r[1]]),
-        )
-        sol_l = _multistart(
-            left,
-            starts,
-            np.array([hip_l[0], knee_l[0]]),
-            np.array([hip_l[1], knee_l[1]]),
-        )
+            def residual_parts(q):
+                values = dict(zip(names, q))
+                values.setdefault(f"ankle_angle_{side}", 0.0)
+                rider.set(values)
+                heel = rider.marker(f"{side.upper()}CAL")
+                mt5 = rider.marker(f"{side.upper()}MT5")
+                toe = rider.marker(f"{side.upper()}TOE")
+                midpoint = (mt5 + toe) / 2
+                rotation = rider.body_rotation(f"calcn_{side}")
+                neutral = rider.foot[side]["neutral"]
+                pitch = _pitch(rotation, neutral)
+                pedal_pitch = pitch if side == "l" else 0.0
+                normal = np.array([-math.sin(pedal_pitch), math.cos(pedal_pitch)])
+                tangent = np.array([math.cos(pedal_pitch), math.sin(pedal_pitch)])
+                forefoot_offset = midpoint[:2] - pedal
+                forefoot_clearance = float(np.dot(forefoot_offset, normal))
+                forefoot_longitudinal_offset = float(
+                    np.dot(forefoot_offset, tangent)
+                )
+                foot_axis = midpoint - heel
+                foot_axis /= np.linalg.norm(foot_axis)
+                pedal_axis = np.array([tangent[0], tangent[1], 0.0])
+                pedal_normal = np.array([normal[0], normal[1], 0.0])
+                sole_normal = np.cross(toe - heel, mt5 - heel)
+                sole_normal /= np.linalg.norm(sole_normal)
+                if np.dot(sole_normal, pedal_normal) < 0:
+                    sole_normal = -sole_normal
+                plane_alignment = sole_normal - pedal_normal
+                axis_alignment = foot_axis - pedal_axis
+                contact = np.array(
+                    [
+                        forefoot_clearance - self.half_pedal - self.shoe,
+                        toe[2] - inner_edge_z,
+                        forefoot_longitudinal_offset,
+                        midpoint[2] - pedal_center_z,
+                    ]
+                )
+                orientation = np.concatenate(
+                    (
+                        _FOOT_PLANE_ALIGNMENT_WEIGHT * plane_alignment,
+                        _FOOT_AXIS_ALIGNMENT_WEIGHT * axis_alignment,
+                    )
+                )
+                return contact, orientation
+
+            def residual(q):
+                contact, orientation = residual_parts(q)
+                return np.concatenate((contact, orientation))
+
+            def contact_residual(q):
+                contact, _ = residual_parts(q)
+                return contact
+
+            return names, residual, contact_residual
+
+        solutions = {}
+        for side in ("r", "l"):
+            names, residual, contact_residual = leg(side)
+            bounds = np.array([rider.bounds(n) for n in names])
+            starts = [
+                [h, 0.0, 0.0, k] + ([0.0] if side == "r" else []) + [0.0]
+                for h in (0.6, 1.1, 1.6)
+                for k in (0.8, 1.5, 2.1)
+            ]
+            solutions[side] = (
+                names,
+                residual,
+                contact_residual,
+                _multistart(residual, starts, bounds[:, 0], bounds[:, 1]),
+            )
         rider.neutral()
         rider.place_pelvis(hip_target)
-        values = {
-            "hip_flexion_r": sol_r.x[0],
-            "knee_angle_r": sol_r.x[1],
-            "ankle_angle_r": sol_r.x[2],
-            "hip_flexion_l": sol_l.x[0],
-            "knee_angle_l": sol_l.x[1],
-            "ankle_angle_l": 0.0,
-        }
+        values = {"ankle_angle_l": 0.0}
+        for names, _, _, solution in solutions.values():
+            values.update(zip(names, solution.x))
         rider.set(values)
         pitch_l = _pitch(rider.body_rotation("calcn_l"), rider.foot["l"]["neutral"])
         return {
             "values": values,
             "knee_x": float(rider.user.right_knee[0]),
-            "residual": float(max(np.abs(right(sol_r.x)).max(), np.abs(left(sol_l.x)).max())),
+            "residual": float(
+                max(
+                    np.abs(contact_residual(sol.x)).max()
+                    for _, _, contact_residual, sol in solutions.values()
+                )
+            ),
             "left_pedal_pitch": pitch_l,
         }
 
@@ -231,7 +301,7 @@ class _LegFit:
 def _choose_tube_step(bike: Any, target: float) -> int:
     nominal = int(np.argmin(np.abs(bike.seat_horizontal_positions_mm)))
     lift = np.array([0.0, bike._seat_height_mm * 1e-3 / 2, 0.0])
-    axis = bike.crank_axis_position
+    axis = bike._crank_axis_position_m
     crank = bike._crank_length_mm * 1e-3
     pedal_tops = axis[None, :2] + crank * np.stack([np.cos(_BOTTOM_ANGLES), np.sin(_BOTTOM_ANGLES)], axis=1)
     pedal_tops[:, 1] += bike._pedal_size_mm[2] * 1e-3 / 2
@@ -243,31 +313,22 @@ def _choose_tube_step(bike: Any, target: float) -> int:
 
 
 def _handlebar_pose(bike: Any, stem_step: int, slide_step: int) -> tuple[np.ndarray, np.ndarray]:
-    rotation = euler_xyz_to_matrix(
-        (
-            math.radians(bike._handlebar_roll_deg),
-            math.radians(bike._handlebar_tilt_deg),
-            math.radians(bike._handlebar_pitch_deg),
-        )
-    )
-    return bike._handlebar_position_at(stem_step, slide_step), rotation
+    return bike._handlebar_position_at(stem_step, slide_step), np.eye(3)
 
 
 def _horn_local(bike: Any, side: str) -> np.ndarray:
     sign = 1.0 if side == "r" else -1.0
-    return np.array([bike._horn_length_mm * 1e-3 / 2, 0.0, sign * bike._handlebar_width_mm * 1e-3 / 2])
+    start = np.array([0.0, 0.0, sign * bike._handlebar_width_mm * 1e-3 / 2])
+    direction = _horn_direction(bike._horn_pitch_deg, bike._horn_roll_deg, side)
+    return start + bike._horn_length_mm * 1e-3 / 2 * direction
 
 
 class _ArmFit:
-    """Arm placement with the trunk fixed and the hands on the horns.
-
-    Per arm the unknowns are shoulder flexion, shoulder adduction and elbow
-    flexion: three unknowns for the three hand coordinates. The small
-    regularization towards the requested flexions only picks the solution
-    among near-singular ones.
-    """
+    """Fit both hands while sharing shoulder and elbow flexion bilaterally."""
 
     NAMES = ("arm_flex_r", "arm_add_r", "elbow_flex_r", "arm_flex_l", "arm_add_l", "elbow_flex_l")
+    # Forearms in the neutral position (thumbs up): 90 degrees from full supination.
+    NEUTRAL_FOREARM = {"pro_sup_r": math.pi / 2, "pro_sup_l": math.pi / 2}
 
     def __init__(self, rider: _Rider, lumbar: float, shoulder: float, elbow: float):
         self.rider = rider
@@ -280,7 +341,12 @@ class _ArmFit:
 
     def hands(self, x: np.ndarray) -> np.ndarray:
         rider = self.rider
-        rider.set(dict(zip(self.NAMES, x)) | {"lumbar_extension": self.lumbar})
+        lumbar = float(x[len(self.NAMES)]) if len(x) > len(self.NAMES) else self.lumbar
+        rider.set(
+            dict(zip(self.NAMES, x[: len(self.NAMES)]))
+            | {"lumbar_extension": lumbar}
+            | self.NEUTRAL_FOREARM
+        )
         return np.concatenate(
             [rider.station(f"hand_{s}", np.array([0.0, -rider.palm[s] / 2, 0.0])) for s in ("r", "l")]
         )
@@ -289,30 +355,104 @@ class _ArmFit:
         """Hand positions with the requested shoulder and elbow flexions and no adduction."""
         return self.hands(np.clip(self.reference, self.lower, self.upper))
 
-    def solve(self, grips: np.ndarray) -> dict[str, Any]:
+    def solve(
+        self,
+        grips: np.ndarray,
+        *,
+        adjust_trunk: bool = False,
+    ) -> dict[str, Any]:
+        reference = np.clip(self.reference, self.lower, self.upper)
+        variable_indices = np.array([0, 1, 2, 4])
+        lower = self.lower[variable_indices]
+        upper = self.upper[variable_indices]
+        parameter_reference = reference[variable_indices]
         weights = np.array([1.0, 1e-2, 1.0, 1.0, 1e-2, 1.0])
-        starts = (self.reference, np.array([1.0, 0.0, 0.3, 1.0, 0.0, 0.3]), np.array([0.4, 0.0, 1.2, 0.4, 0.0, 1.2]))
-        best = None
-        for start in starts:
-            result = minimize(
-                lambda x: float(np.sum(weights * (x - self.reference) ** 2)),
-                np.clip(start, self.lower, self.upper),
-                method="SLSQP",
-                bounds=list(zip(self.lower, self.upper)),
-                constraints={"type": "eq", "fun": lambda x: self.hands(x) - grips},
-                options={"maxiter": 300, "ftol": 1e-10},
+        if adjust_trunk:
+            lumbar_bounds = np.array([self.rider.bounds("lumbar_extension")])
+            reference = np.concatenate((reference, [self.lumbar]))
+            parameter_reference = np.concatenate((parameter_reference, [self.lumbar]))
+            lower = np.concatenate((lower, lumbar_bounds[:, 0]))
+            upper = np.concatenate((upper, lumbar_bounds[:, 1]))
+            weights = np.concatenate((weights, [1.0]))
+
+        def expand(parameters: np.ndarray) -> np.ndarray:
+            arms = np.array(
+                [
+                    parameters[0],
+                    parameters[1],
+                    parameters[2],
+                    parameters[0],
+                    parameters[3],
+                    parameters[2],
+                ]
             )
-            residual = float(np.abs(self.hands(result.x) - grips).max())
-            key = (max(residual - _TOLERANCE_M, 0.0), result.fun)
-            if best is None or key < best[0]:
-                best = (key, residual, result)
-        _, residual, result = best
-        x = result.x
+            return (
+                np.concatenate((arms, [parameters[4]]))
+                if adjust_trunk
+                else arms
+            )
+
+        def residual(parameters: np.ndarray) -> np.ndarray:
+            values = expand(parameters)
+            hand_error_mm = (self.hands(values) - grips) * 1000.0
+            posture_error = 0.1 * np.sqrt(weights) * (values - reference)
+            return np.concatenate((hand_error_mm, posture_error))
+
+        starts = [
+            parameter_reference,
+            np.array([1.0, 0.0, 0.3, 0.0]),
+            np.array([0.4, 0.0, 1.2, 0.0]),
+        ]
+        if adjust_trunk:
+            starts = [
+                np.concatenate((start, [self.lumbar]))
+                if len(start) == len(variable_indices)
+                else start
+                for start in starts
+            ]
+        result = _multistart(residual, starts, lower, upper)
+        x = expand(result.x)
+        residual_mm = float(np.abs(self.hands(x) - grips).max() * 1000.0)
+        lumbar = float(x[len(self.NAMES)]) if adjust_trunk else self.lumbar
         return {
-            "values": dict(zip(self.NAMES, x)) | {"lumbar_extension": self.lumbar},
-            "residual": residual,
-            "flexion_deg": math.degrees((x[0] + x[3]) / 2),
-            "elbow_deg": math.degrees((x[2] + x[5]) / 2),
+            "values": dict(zip(self.NAMES, x))
+            | {"lumbar_extension": lumbar}
+            | self.NEUTRAL_FOREARM,
+            "residual": residual_mm / 1000.0,
+            "flexion_deg": math.degrees(x[0]),
+            "elbow_deg": math.degrees(x[2]),
+        }
+
+    def solve_with_fixed_flexions(self, grips: np.ndarray) -> dict[str, Any]:
+        """Keep requested flexion coordinates fixed while fitting shoulder adduction."""
+        reference = np.clip(self.reference, self.lower, self.upper)
+        free_indices = np.array([1, 4])
+        lower = self.lower[free_indices]
+        upper = self.upper[free_indices]
+
+        def residual(adduction: np.ndarray) -> np.ndarray:
+            values = reference.copy()
+            values[free_indices] = adduction
+            hand_error = self.hands(values) - grips
+            regularization = 0.1 * (adduction - reference[free_indices])
+            return np.concatenate((hand_error, regularization))
+
+        starts = (
+            reference[free_indices],
+            np.array([lower[0], upper[1]]),
+            np.array([upper[0], lower[1]]),
+        )
+        result = _multistart(residual, starts, lower, upper)
+        values = reference.copy()
+        values[free_indices] = result.x
+        hand_error = float(np.abs(self.hands(values) - grips).max())
+        return {
+            "values": dict(zip(self.NAMES, values))
+            | {"lumbar_extension": self.lumbar}
+            | self.NEUTRAL_FOREARM,
+            "residual": hand_error,
+            "flexion_deg": math.degrees((values[0] + values[3]) / 2),
+            "elbow_deg": math.degrees((values[2] + values[5]) / 2),
         }
 
 def _mount(parent_body: Any, name: str, rotation: np.ndarray, position: np.ndarray) -> None:
@@ -331,22 +471,26 @@ def _mount(parent_body: Any, name: str, rotation: np.ndarray, position: np.ndarr
 
 def fit_user(
     bike: Any,
-    user: Any,
+    user: Any | None = None,
     shoe_height_cm: float = 3.0,
-    trunk_angle_deg: float | None = None,
-    shoulder_flexion_deg: float = 90.0,
-    elbow_flexion_deg: float = 5.0,
+    trunk_angle_deg: float | None = 45.0,
+    shoulder_flexion_deg: float = 75.0,
+    elbow_flexion_deg: float = 15.0,
+    allow_ik_adjustment: bool = True,
 ) -> Framework:
     """Fit ``user`` on ``bike`` and return a framework of the two models.
 
     Procedure (the bike and the user are modified in place):
 
-    1. The right crank is at maximum advancement (``crank_angle = 0``). Each
-       foot rests on its pedal with the 5th-metatarsal marker above the pedal
-       axis and the sole ``shoe_height_cm`` above the pedal top surface. The
-       right foot (and pedal) is parallel to the ground; the left pedal is
-       rotated so that the left ankle is neutral (flexion 0). Both feet are
-       welded to their pedals, which stay free to rotate.
+    1. The right crank is at maximum advancement (``crank_angle = 0``). The
+       toe marker (used as the medial forefoot landmark) is aligned with the
+       inner edge of each pedal, and the midpoint between the toe and MT5
+       markers is over the pedal centre. Its distance from the pedal top,
+       measured along the pedal normal, is ``shoe_height_cm``. The right foot
+       (and pedal) is parallel to the ground; the left pedal follows the foot
+       pitch while the left ankle stays neutral (flexion 0). Both feet are
+       welded to their pedals, which stay free to rotate; the forefoot
+       midpoint therefore retains its radial offset from each pedal axis.
     2. The seat tube step is the one for which the maximum distance, over a
        crank revolution, between the seat top (at the slide step closest to 0)
        and the pedal top surface is closest to the user's crotch height plus
@@ -354,16 +498,16 @@ def fit_user(
     3. With the tube fixed, the seat slide step is the one for which the right
        knee joint centre is closest to the vertical of the right pedal axis.
        The user's hip centres sit on the seat top surface, pelvis upright.
-    4. The trunk is fixed: at the user's current ``lumbar_extension`` when
+    4. The trunk starts at the user's current ``lumbar_extension`` when
        ``trunk_angle_deg`` is ``None``, otherwise at the requested inclination
        (forward from the vertical, of the mid-hip to mid-shoulder line;
-       0 = upright, pelvis upright). With ``trunk_angle_deg=None`` the stem
+       0 = upright, pelvis upright). When inverse-kinematics adjustment is
+       enabled, the trunk and arm angles can adapt to place the hands on the
+       horns; with ``trunk_angle_deg=None``, the initial trunk posture is the
+       starting reference rather than a fixed target. In this mode, the stem
        step brings the handlebar centre as close as possible to the seat top
-       height and the handlebar slide step gets the shoulder and elbow
-       flexions closest to the requested ones. With ``trunk_angle_deg`` given
-       the seat-height rule no longer applies: trunk, shoulder flexion and
-       elbow flexion define where the hands are, and the stem and slide steps
-       closest to that position are used.
+       height. Shoulder flexion and elbow flexion are shared between sides;
+       shoulder adduction remains independently adjustable.
 
     The solution is the best available among the discrete steps; a
     ``UserWarning`` is issued when a constraint cannot be met within 5 mm.
@@ -373,16 +517,22 @@ def fit_user(
 
     Parameters
     ----------
-    user : User
-        Anthropometric user (facing +x, right side at +z).
+    user : User or None, default=None
+        Anthropometric user (facing +x, right side at +z). If omitted, uses a
+        170 cm, 70 kg male reference user.
     shoe_height_cm : float, default=3.0
         Sole height of the shoes in centimetres.
-    trunk_angle_deg : float or None, default=None
-        Trunk inclination in degrees; ``None`` keeps the user's current lumbar posture.
-    shoulder_flexion_deg : float, default=90.0
+    trunk_angle_deg : float or None, default=45.0
+        Trunk inclination in degrees; ``None`` uses the user's current lumbar
+        posture as the starting reference, which inverse kinematics may adjust.
+    shoulder_flexion_deg : float, default=75.0
         Desired shoulder flexion (``arm_flex``) in degrees.
-    elbow_flexion_deg : float, default=5.0
+    elbow_flexion_deg : float, default=15.0
         Desired elbow flexion (``elbow_flex``) in degrees; 0 is a straight arm.
+    allow_ik_adjustment : bool, default=True
+        Allow inverse kinematics to adjust the requested trunk, shoulder and
+        elbow flexions. When false, these angles remain fixed while other
+        degrees of freedom, such as shoulder adduction, can still be fitted.
 
     Returns
     -------
@@ -392,8 +542,12 @@ def fit_user(
     """
     from ..user import User
 
-    if not isinstance(user, User):
+    if user is None:
+        user = User("M", height_cm=170.0, mass_kg=70.0)
+    elif not isinstance(user, User):
         raise TypeError("user must be a User instance")
+    if not isinstance(allow_ik_adjustment, bool):
+        raise TypeError("allow_ik_adjustment must be a bool")
     shoe = float(shoe_height_cm)
     if not math.isfinite(shoe) or shoe < 0:
         raise ValueError("shoe_height_cm must be a non-negative finite value")
@@ -415,7 +569,7 @@ def fit_user(
     bike.set_seat_tube_step(tube_step)
 
     legs = _LegFit(rider, bike, shoe)
-    axis = bike.crank_axis_position
+    axis = bike._crank_axis_position_m
     pedal_x = axis[0] + bike._crank_length_mm * 1e-3
     candidates = []
     for slide in range(bike._seat_horizontal_steps + 1):
@@ -439,8 +593,26 @@ def fit_user(
         lumbar = rider.initial_lumbar
     else:
         lumbar = rider.lumbar_for_trunk(math.radians(trunk_angle_deg))
-    trunk_deg = math.degrees(rider.trunk_angle(lumbar))
     arms = _ArmFit(rider, lumbar, math.radians(shoulder_flexion_deg), math.radians(elbow_flexion_deg))
+    if not allow_ik_adjustment:
+        for coordinate_name, angle in (
+            ("arm_flex_r", shoulder_flexion_deg),
+            ("arm_flex_l", shoulder_flexion_deg),
+            ("elbow_flex_r", elbow_flexion_deg),
+            ("elbow_flex_l", elbow_flexion_deg),
+        ):
+            low, high = rider.bounds(coordinate_name)
+            value = math.radians(angle)
+            if not low <= value <= high:
+                raise ValueError(
+                    f"{coordinate_name} must be within [{math.degrees(low):g}, "
+                    f"{math.degrees(high):g}] degrees when IK adjustment is disabled"
+                )
+
+    def fit_arms(grips: np.ndarray) -> dict[str, Any]:
+        if allow_ik_adjustment:
+            return arms.solve(grips, adjust_trunk=True)
+        return arms.solve_with_fixed_flexions(grips)
 
     def grips_at(stem: int, slide: int) -> np.ndarray:
         centre, rotation = _handlebar_pose(bike, stem, slide)
@@ -448,8 +620,8 @@ def fit_user(
 
     steps = [(stem, slide) for stem in range(bike._stem_steps + 1) for slide in range(bike._handlebar_horizontal_steps + 1)]
     if trunk_angle_deg is None:
-        # The trunk stays as it is: the stem sets the handlebar at the seat height and
-        # the slide gets the arm angles as close as possible to the requested ones.
+        # The starting trunk posture is a reference for the IK; the stem keeps
+        # the handlebar near seat height while the slide and trunk fit the hands.
         options = []
         for slide in range(bike._handlebar_horizontal_steps + 1):
             stem = int(
@@ -460,12 +632,15 @@ def fit_user(
                     ]
                 )
             )
-            arm = arms.solve(grips_at(stem, slide))
-            score = (
-                abs(arm["flexion_deg"] - shoulder_flexion_deg)
-                + abs(arm["elbow_deg"] - elbow_flexion_deg)
-                + 1e3 * max(arm["residual"] - _TOLERANCE_M, 0.0)
-            )
+            arm = fit_arms(grips_at(stem, slide))
+            if allow_ik_adjustment:
+                score = (
+                    abs(arm["flexion_deg"] - shoulder_flexion_deg)
+                    + abs(arm["elbow_deg"] - elbow_flexion_deg)
+                    + 1e3 * max(arm["residual"] - _TOLERANCE_M, 0.0)
+                )
+            else:
+                score = arm["residual"]
             options.append((score, slide, stem, arm))
         _, handlebar_slide, stem_step, arm_solution = min(options, key=lambda item: item[0])
     else:
@@ -473,10 +648,10 @@ def fit_user(
         wanted = arms.reference_hands().reshape(2, 3)[:, :2]
         errors = [np.linalg.norm(grips_at(*step).reshape(2, 3)[:, :2] - wanted, axis=1).mean() for step in steps]
         stem_step, handlebar_slide = steps[int(np.argmin(errors))]
-        arm_solution = arms.solve(grips_at(stem_step, handlebar_slide))
+        arm_solution = fit_arms(grips_at(stem_step, handlebar_slide))
     bike.set_stem_step(stem_step)
     bike.set_handlebar_horizontal_step(handlebar_slide)
-    height_error = bike.handlebar_position[1] - seat_top_y
+    height_error = bike._handlebar_position_m[1] - seat_top_y
     if arm_solution["residual"] > _TOLERANCE_M or (
         trunk_angle_deg is None and abs(height_error) > 0.02
     ):
@@ -491,6 +666,9 @@ def fit_user(
     rider.place_pelvis(hip)
     rider.set(legs_solution["values"])
     rider.set(arm_solution["values"])
+    trunk_deg = math.degrees(
+        rider.trunk_angle(rider.value("lumbar_extension"))
+    )
     rider.sync_couplers()
     user.update_state()
 

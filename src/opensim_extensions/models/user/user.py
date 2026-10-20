@@ -6,6 +6,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
+
+from ...bodies.shapes import MESHES_DIR
 from ...opensim import import_opensim, register_geometry_search_path
 from .data import DEFAULT_DATASET, resolve_reference
 from .joint_center_table import JOINT_CENTER_NAMES as _JOINT_CENTER_NAMES
@@ -58,6 +61,18 @@ def _axis_scale_factors(
     )
 
 
+def _remove_segment_mass(body: Any, mass: float, center: np.ndarray) -> None:
+    """Split a rigid segment's mass into a new body while preserving its first moment."""
+    original_mass = body.getMass()
+    remaining_mass = original_mass - mass
+    if remaining_mass <= 0:
+        raise ValueError(f"cannot split {mass:g} kg from body {body.getName()!r}")
+    original_center = np.array([body.getMassCenter().get(i) for i in range(3)])
+    remaining_center = (original_mass * original_center - mass * center) / remaining_mass
+    body.scaleMass(remaining_mass / original_mass)
+    body.setMassCenter(opensim.Vec3(*remaining_center))
+
+
 class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
     """An ANSUR-based anthropometric user backed by an OpenSim model.
 
@@ -97,7 +112,7 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         is from the observed range.
     percentile : float, optional
         Common ANSUR percentile applied to every numeric measurement when
-        ``height`` is not provided. Defaults to ``50.0``. Must lie in the
+        ``height_cm`` is not provided. Defaults to ``50.0``. Must lie in the
         inclusive interval ``[0.1, 99.9]``; this applies ``numpy.percentile``
         independently per measurement (no single reference subject is
         selected, and no interpolation is performed across different
@@ -125,7 +140,7 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
     Raises
     ------
     ValueError
-        If ``gender`` is not ``"M"``/``"F"``, if ``height`` is given but is
+        If ``gender`` is not ``"M"``/``"F"``, if ``height_cm`` is given but is
         not a positive finite number, if ``percentile`` is not finite or
         falls outside ``[0.1, 99.9]``, or if ``mass_kg`` is given but is not
         a positive finite number.
@@ -143,7 +158,7 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         """Resolve anthropometry, load the base model, scale it, and calibrate its total mass.
 
         See the class docstring for the full description of ``gender``,
-        ``height``, ``percentile``, ``mass_kg``, and ``dataset``, and of
+        ``height_cm``, ``percentile``, ``mass_kg``, and ``dataset``, and of
         the conditions under which a
         :class:`ValueError` or :class:`UserWarning` is raised. After
         resolving the anthropometric reference, this loads the bundled model
@@ -167,9 +182,11 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         register_geometry_search_path(opensim, DEFAULT_MESHES_DIR)
         opensim.Model.__init__(self, str(DEFAULT_MODEL_PATH))
         self._unlock_coordinates()
+        self._baseline = resolve_reference(self.gender, percentile=50.0, dataset=dataset)
+        self._add_anatomical_bodies()
+        self.finalizeConnections()
         self.state = self.initSystem()
         self.add_geometry_directory(DEFAULT_MESHES_DIR)
-        self._baseline = resolve_reference(self.gender, percentile=50.0, dataset=dataset)
         factors = segment_scale_factors(self._reference, self._baseline)
         self.scale_bodies(self._expand_bilateral_bodies(factors))
         # Geometric scaling alone only moves mass as a volumetric side
@@ -185,6 +202,134 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         )
         self._rescale_total_mass(target_mass_kg)
         self._mass_kg = target_mass_kg
+
+    def _add_anatomical_bodies(self) -> None:
+        """Separate the cervical spine and skull into articulated bodies."""
+        torso = self.getBodySet().get("torso")
+        head_meshes = []
+        spine_mesh = None
+        for index in range(torso.getPropertyByName("attached_geometry").size()):
+            mesh = opensim.Mesh.safeDownCast(torso.get_attached_geometry(index))
+            if mesh is None:
+                continue
+            if mesh.get_mesh_file() in {"hat_skull.vtp", "hat_jaw.vtp"}:
+                mesh.upd_Appearance().set_visible(False)
+                head_meshes.append(mesh)
+            elif mesh.get_mesh_file() == "hat_spine.vtp":
+                mesh.set_mesh_file("hat_spine_torso.vtp")
+                spine_mesh = mesh
+
+        neck_center = np.array([0.0, 0.445, 0.0])
+        neck_mass = 1000.0 * math.pi * 0.045**2 * 0.09
+        neck_radial_inertia = neck_mass * (
+            3 * 0.045**2 + 0.09**2
+        ) / 12
+        neck_axial_inertia = 0.5 * neck_mass * 0.045**2
+        if spine_mesh is None:
+            raise RuntimeError("The bundled model does not contain hat_spine.vtp")
+        neck = opensim.Body(
+            "neck",
+            neck_mass,
+            opensim.Vec3(*neck_center),
+            opensim.Inertia(
+                neck_radial_inertia,
+                neck_axial_inertia,
+                neck_radial_inertia,
+            ),
+        )
+        neck_mesh = opensim.Mesh("hat_neck.vtp")
+        neck_mesh.setName("neck_spine")
+        neck_mesh.set_scale_factors(spine_mesh.get_scale_factors())
+        neck_mesh.setColor(spine_mesh.getColor())
+
+        skull_mass = 4.5
+        skull_center = np.array([0.0, 0.57, 0.0])
+        skull_inertia = opensim.Inertia(0.0103, 0.0104, 0.0124)
+        skull = opensim.Body(
+            "skull",
+            skull_mass,
+            opensim.Vec3(*skull_center),
+            skull_inertia,
+        )
+
+        _remove_segment_mass(
+            torso,
+            skull_mass + neck_mass,
+            (skull_mass * skull_center + neck_mass * neck_center)
+            / (skull_mass + neck_mass),
+        )
+        self.addBody(neck)
+        self.addBody(skull)
+        neck.attachGeometry(neck_mesh)
+        base_neck_joint = opensim.UniversalJoint(
+            "torso_neck",
+            torso,
+            opensim.Vec3(0.0, 0.445, 0.0),
+            opensim.Vec3(0),
+            neck,
+            opensim.Vec3(0.0, 0.445, 0.0),
+            opensim.Vec3(0),
+        )
+        base_neck_coordinates = (
+            ("neck_base_flexion", -0.7, 0.85),
+            ("neck_base_lateral_flexion", -0.5, 0.5),
+        )
+        for index, (name, low, high) in enumerate(base_neck_coordinates):
+            coordinate = base_neck_joint.getCoordinate(index)
+            coordinate.setName(name)
+            coordinate.setRangeMin(low)
+            coordinate.setRangeMax(high)
+            coordinate.set_clamped(True)
+            coordinate.set_locked(False)
+        self.addJoint(base_neck_joint)
+        head_joint = opensim.BallJoint(
+            "neck_skull",
+            neck,
+            opensim.Vec3(0.0, 0.49, 0.0),
+            opensim.Vec3(0),
+            skull,
+            opensim.Vec3(0.0, 0.49, 0.0),
+            opensim.Vec3(0),
+        )
+        neck_coordinates = (
+            ("neck_lateral_flexion", -0.5, 0.5),
+            ("neck_rotation", -1.22, 1.22),
+            ("neck_flexion", -0.7, 0.85),
+        )
+        for index, (name, low, high) in enumerate(neck_coordinates):
+            coordinate = head_joint.getCoordinate(index)
+            coordinate.setName(name)
+            coordinate.setRangeMin(low)
+            coordinate.setRangeMax(high)
+            coordinate.set_clamped(True)
+            coordinate.set_locked(False)
+        self.addJoint(head_joint)
+
+        for mesh in head_meshes:
+            head_mesh = opensim.Mesh(mesh.get_mesh_file())
+            head_mesh.setName(f"skull_{mesh.getName()}")
+            head_mesh.set_scale_factors(mesh.get_scale_factors())
+            head_mesh.setColor(mesh.getColor())
+            skull.attachGeometry(head_mesh)
+
+        for marker_name, location in (
+            ("REYE", (0.075, 0.56, 0.03)),
+            ("LEYE", (0.075, 0.56, -0.03)),
+        ):
+            self.addMarker(
+                opensim.Marker(marker_name, skull, opensim.Vec3(*location))
+            )
+
+        baseline_palm_length = self._baseline.values["palmlength"] * 1e-3
+        for side, marker_name in (("r", "RPALM"), ("l", "LPALM")):
+            hand = self.getBodySet().get(f"hand_{side}")
+            self.addMarker(
+                opensim.Marker(
+                    marker_name,
+                    hand,
+                    opensim.Vec3(0.0, -baseline_palm_length / 2, 0.0),
+                )
+            )
 
     def _unlock_coordinates(self) -> None:
         """Unlock the coordinates that the bundled model locks by default."""
@@ -384,7 +529,11 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
     ) -> None:
         sources: dict[str, Path] = {}
         missing: list[str] = []
-        search_directories = (*self._geometry_dirs, DEFAULT_MODEL_PATH.parent)
+        search_directories = (
+            *self._geometry_dirs,
+            DEFAULT_MODEL_PATH.parent,
+            MESHES_DIR,
+        )
         for _, filename in mesh_files:
             source = next(
                 (
@@ -420,12 +569,14 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
 
     def _referenced_mesh_files(self) -> list[tuple[Any, str]]:
         meshes: list[tuple[Any, str]] = []
-        for index in range(self.getBodySet().getSize()):
-            body = self.getBodySet().get(index)
-            geometry_property = body.getPropertyByName("attached_geometry")
+        for component in self.getComponentsList():
+            frame = opensim.PhysicalFrame.safeDownCast(component)
+            if frame is None:
+                continue
+            geometry_property = frame.getPropertyByName("attached_geometry")
             for geometry_index in range(geometry_property.size()):
                 mesh = opensim.Mesh.safeDownCast(
-                    body.get_attached_geometry(geometry_index)
+                    frame.get_attached_geometry(geometry_index)
                 )
                 if mesh is not None:
                     meshes.append((mesh, mesh.get_mesh_file()))
@@ -441,6 +592,51 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
     def _coordinate_degrees(self, name: str) -> float:
         value = self.getCoordinateSet().get(name).getValue(self.state)
         return math.degrees(value)
+
+    def set_neck_flexion(self, degrees: float) -> None:
+        """Set the neck flexion/extension coordinate in degrees."""
+        self._set_coordinate_degrees("neck_flexion", degrees)
+
+    @property
+    def neck_flexion(self) -> float:
+        """Return the neck flexion/extension coordinate in degrees."""
+        return self._coordinate_degrees("neck_flexion")
+
+    def set_neck_lateral_flexion(self, degrees: float) -> None:
+        """Set the neck lateral-flexion coordinate in degrees."""
+        self._set_coordinate_degrees("neck_lateral_flexion", degrees)
+
+    @property
+    def neck_lateral_flexion(self) -> float:
+        """Return the neck lateral-flexion coordinate in degrees."""
+        return self._coordinate_degrees("neck_lateral_flexion")
+
+    def set_neck_rotation(self, degrees: float) -> None:
+        """Set the neck axial-rotation coordinate in degrees."""
+        self._set_coordinate_degrees("neck_rotation", degrees)
+
+    @property
+    def neck_rotation(self) -> float:
+        """Return the neck axial-rotation coordinate in degrees."""
+        return self._coordinate_degrees("neck_rotation")
+
+    def set_neck_base_flexion(self, degrees: float) -> None:
+        """Set flexion/extension of the neck at its base, in degrees."""
+        self._set_coordinate_degrees("neck_base_flexion", degrees)
+
+    @property
+    def neck_base_flexion(self) -> float:
+        """Return flexion/extension of the neck at its base, in degrees."""
+        return self._coordinate_degrees("neck_base_flexion")
+
+    def set_neck_base_lateral_flexion(self, degrees: float) -> None:
+        """Set lateral flexion of the neck at its base, in degrees."""
+        self._set_coordinate_degrees("neck_base_lateral_flexion", degrees)
+
+    @property
+    def neck_base_lateral_flexion(self) -> float:
+        """Return lateral flexion of the neck at its base, in degrees."""
+        return self._coordinate_degrees("neck_base_lateral_flexion")
 
     def _rescale_total_mass(self, mass_kg: float) -> None:
         """Uniformly rescale every body's mass and inertia so the model's total mass matches ``mass_kg`` exactly.
@@ -592,10 +788,10 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         return self._reference.gender
 
     @property
-    def height(self):
+    def height_cm(self):
         """Return this user's resolved stature, in centimetres.
 
-        If the constructor was called with ``height=...``, this is exactly
+        If the constructor was called with ``height_cm=...``, this is exactly
         that value (even if it was outside the ANSUR range and triggered
         extrapolation). Otherwise it is the ANSUR stature at the resolved
         ``percentile`` for this user's ``gender``.
@@ -613,12 +809,12 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
 
         When the constructor was called with ``percentile=...`` (the
         default path), this is exactly that value, applied independently to
-        every ANSUR measurement. When it was called with ``height=...``
+        every ANSUR measurement. When it was called with ``height_cm=...``
         instead, every measurement is resolved directly from the requested
         height (not from this percentile), and this property instead
         reports the *empirical* percentile of that height within the ANSUR
         population of this user's ``gender`` -- informational only, see the
-        constructor's ``height`` parameter.
+        constructor's ``height_cm`` parameter.
 
         Returns
         -------
@@ -751,6 +947,22 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         return {
             name: self._marker_location(marker)
             for name, marker in _FOOT_MARKER_NAMES.items()
+        }
+
+    @property
+    def eye_markers(self) -> dict[str, tuple[float, float, float]]:
+        """Return the right and left orbital marker locations in ground coordinates."""
+        return {
+            side: self._marker_location(marker)
+            for side, marker in (("right", "REYE"), ("left", "LEYE"))
+        }
+
+    @property
+    def palm_markers(self) -> dict[str, tuple[float, float, float]]:
+        """Return the right and left palm-centre marker locations in ground coordinates."""
+        return {
+            side: self._marker_location(marker)
+            for side, marker in (("right", "RPALM"), ("left", "LPALM"))
         }
 
     @property

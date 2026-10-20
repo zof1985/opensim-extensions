@@ -19,6 +19,7 @@ __all__ = [
     "Tube",
     "Disk",
     "Sphere",
+    "Ellipsoid",
     "cylinder_between",
     "euler_xyz_to_matrix",
     "matrix_to_euler_xyz",
@@ -203,6 +204,33 @@ class Sphere(Shape):
 
     def _geometry(self):
         return _mesh("unit_sphere.vtp", (2 * self.radius,) * 3)
+
+
+@dataclass
+class Ellipsoid(Shape):
+    """Ellipsoid with semi-axes ``radii`` (x, y, z) in metres."""
+
+    radii: Sequence[float] = (0.5, 0.5, 0.5)
+
+    def __post_init__(self):
+        _validate(**{f"radii[{i}]": value for i, value in enumerate(self.radii)})
+
+    @property
+    def volume(self) -> float:
+        return float(4.0 / 3.0 * math.pi * np.prod(self.radii))
+
+    def _local_inertia(self, mass: float) -> np.ndarray:
+        rx, ry, rz = self.radii
+        return np.diag(
+            [
+                ry**2 + rz**2,
+                rx**2 + rz**2,
+                rx**2 + ry**2,
+            ]
+        ) * mass / 5
+
+    def _geometry(self):
+        return _mesh("unit_sphere.vtp", tuple(2 * radius for radius in self.radii))
 
 
 def cylinder_between(

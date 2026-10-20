@@ -1,18 +1,10 @@
 numpy>=1.24
 pandas>=2.0
-
-# OpenSim Python bindings, required to build/pose/export an OpenSimModel.
-# The native visualizer DLL path (Windows) is fixed up automatically at
-# import time; no extra setup is needed once these bindings are installed.
-# On Windows, install via a compatible Conda environment if pip install fails:
-#   conda install -c opensim-org opensim
+scipy>=1.10
+vtk>=9.2
+sv-ttk>=2.6
+Pillow>=9
+imageio>=2.30
+imageio-ffmpeg>=0.4
 opensim
-
-# pythonocc-core (OpenCascade bindings), required only for
-# OpenSimModel.from_step (building a model from a .step/.stp CAD file).
-# Not reliably installable via pip; install via conda instead:
-#   conda install -c conda-forge pythonocc-core
-pythonocc-core
-
-# Testing
 pytest>=8

@@ -8,7 +8,13 @@ from typing import Any
 
 import numpy as np
 
+from .bodies.shapes import MESHES_DIR
 from .opensim import import_opensim
+from .opensim import resolve_geometry_file as _resolve_geometry_file
+
+
+def _user_dirs(model: Any) -> tuple:
+    return tuple(getattr(model, "geometry_directories", ()))
 
 __all__ = ["save_animation"]
 
@@ -96,11 +102,9 @@ def save_animation(
     state = model.state if hasattr(model, "state") else model.initSystem()
 
     def resolve_geometry_file(filename: str) -> Path | None:
-        try:
-            resolved = opensim.ModelVisualizer.findGeometryFile(filename)
-        except RuntimeError:
-            return None
-        return Path(str(resolved)) if resolved else None
+        return _resolve_geometry_file(
+            opensim, raw_model, filename, (*_user_dirs(raw_model), MESHES_DIR)
+        )
 
     visualizer_model = SimpleNamespace(
         model=raw_model,

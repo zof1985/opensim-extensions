@@ -213,7 +213,7 @@ def test_explicit_height_resolves_its_empirical_percentile():
     reference = resolve_reference("M", height=175.0, dataset=DATASET)
 
     assert user.percentile == pytest.approx(reference.percentile)
-    assert user.height == pytest.approx(reference.height_cm)
+    assert user.height_cm == pytest.approx(reference.height_cm)
 
 
 @requires_opensim
@@ -222,7 +222,7 @@ def test_anthropometry_property_matches_the_resolved_reference():
 
     assert user.anthropometry.gender == "F"
     assert user.anthropometry.percentile == 75.0
-    assert user.anthropometry.height_cm == pytest.approx(user.height)
+    assert user.anthropometry.height_cm == pytest.approx(user.height_cm)
 
 
 def test_user_has_no_generic_from_osim_constructor():
@@ -365,11 +365,95 @@ def test_set_mass_kg_rejects_non_positive_or_non_finite_values(mass_kg):
 def test_model_components_match_the_bundled_rajagopal_model():
     user = make_user(gender="M", percentile=75.0)
 
-    assert user.getBodySet().getSize() == 22
-    assert user.getJointSet().getSize() == 22
+    assert user.getBodySet().getSize() == 24
+    assert user.getJointSet().getSize() == 24
     assert user.getMuscles().getSize() == 80
-    assert user.getMarkerSet().getSize() == 66
-    assert user.getCoordinateSet().getSize() == 39
+    assert user.getMarkerSet().getSize() == 70
+    assert user.getCoordinateSet().getSize() == 44
+
+
+@requires_opensim
+def test_user_has_articulated_skull_eye_palm_markers_and_wrist_joints():
+    user = make_user(gender="M", height_cm=178.0)
+    bodies = user.getBodySet()
+    joints = user.getJointSet()
+    markers = user.getMarkerSet()
+    coordinates = user.getCoordinateSet()
+
+    assert bodies.contains("neck")
+    assert bodies.contains("skull")
+    assert not bodies.contains("palm_r")
+    assert not bodies.contains("palm_l")
+    assert joints.contains("torso_neck")
+    assert joints.contains("neck_skull")
+    assert joints.get("torso_neck").getConcreteClassName() == "UniversalJoint"
+    for name in (
+        "neck_base_flexion",
+        "neck_base_lateral_flexion",
+        "neck_flexion",
+        "neck_lateral_flexion",
+        "neck_rotation",
+    ):
+        assert coordinates.contains(name)
+    neck_meshes = [
+        opensim.Mesh.safeDownCast(
+            bodies.get("neck").get_attached_geometry(i)
+        ).get_mesh_file()
+        for i in range(
+            bodies.get("neck").getPropertyByName("attached_geometry").size()
+        )
+    ]
+    assert neck_meshes == ["hat_neck.vtp"]
+    torso_meshes = [
+        opensim.Mesh.safeDownCast(
+            bodies.get("torso").get_attached_geometry(i)
+        ).get_mesh_file()
+        for i in range(
+            bodies.get("torso").getPropertyByName("attached_geometry").size()
+        )
+        if opensim.Mesh.safeDownCast(
+            bodies.get("torso").get_attached_geometry(i)
+        )
+        is not None
+    ]
+    assert "hat_spine_torso.vtp" in torso_meshes
+    assert {
+        opensim.Mesh.safeDownCast(bodies.get("skull").get_attached_geometry(i)).get_mesh_file()
+        for i in range(
+            bodies.get("skull").getPropertyByName("attached_geometry").size()
+        )
+    } == {"hat_skull.vtp", "hat_jaw.vtp"}
+
+    for marker_name, parent in (
+        ("REYE", "skull"),
+        ("LEYE", "skull"),
+        ("RPALM", "hand_r"),
+        ("LPALM", "hand_l"),
+    ):
+        assert markers.get(marker_name).getParentFrameName() == f"/bodyset/{parent}"
+    for side in ("r", "l"):
+        wrist_joint = joints.get(f"radius_hand_{side}")
+        assert wrist_joint.getConcreteClassName() == "UniversalJoint"
+        for motion in ("wrist_flex", "wrist_dev"):
+            coordinate = coordinates.get(f"{motion}_{side}")
+            assert coordinate.getRangeMin() < 0 < coordinate.getRangeMax()
+    assert user.eye_markers["right"][2] > user.eye_markers["left"][2]
+    assert user.palm_markers["right"] != user.palm_markers["left"]
+
+    before = user.eye_markers["right"]
+    user.set_neck_flexion(15.0)
+    assert user.neck_flexion == pytest.approx(15.0)
+    assert user.eye_markers["right"] != pytest.approx(before)
+
+    before = user.eye_markers["right"]
+    user.set_neck_base_flexion(10.0)
+    assert user.neck_base_flexion == pytest.approx(10.0)
+    assert user.eye_markers["right"] != pytest.approx(before)
+
+    before = user.eye_markers["right"]
+    user.set_neck_base_lateral_flexion(-8.0)
+    assert user.neck_base_lateral_flexion == pytest.approx(-8.0)
+    assert user.eye_markers["right"] != pytest.approx(before)
 
 
 @requires_opensim

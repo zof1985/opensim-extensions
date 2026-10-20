@@ -94,6 +94,8 @@ def test_to_osim_exports_scaled_model_at_current_posture_with_meshes(tmp_path: P
 
     assert destination.is_file()
     assert (tmp_path / "Geometry" / "r_pelvis.vtp").is_file()
+    assert (tmp_path / "Geometry" / "hat_neck.vtp").is_file()
+    assert (tmp_path / "Geometry" / "hat_spine_torso.vtp").is_file()
     exported = opensim.Model(str(destination))
     state = exported.initSystem()
 
