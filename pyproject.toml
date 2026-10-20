@@ -30,4 +30,5 @@ opensim_extensions = ["models/user/assets/*", "models/user/assets/meshes/*", "bo
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["tests"]
+testpaths = ["test"]
+addopts = "--basetemp=.pytest_tmp"

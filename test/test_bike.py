@@ -1,9 +1,13 @@
 import math
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from opensim_extensions import Bike
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from opensim_extensions import Bike, User
 from opensim_extensions.bodies import (
     Box,
     Cylinder,
@@ -19,12 +23,17 @@ def test_primitive_volumes_and_inertia():
     mass, com, inertia = mass_properties([Sphere(radius=0.1)], 1000.0)
     assert mass == pytest.approx(1000 * 4 / 3 * math.pi * 1e-3)
     assert np.allclose(inertia, np.eye(3) * 0.4 * mass * 0.01)
-    mass, _, inertia = mass_properties([Cylinder(radius=0.1, length=1, axis="z")], 1000.0)
+    mass, _, inertia = mass_properties(
+        [Cylinder(radius=0.1, length=1, axis="z")], 1000.0
+    )
     assert inertia[2, 2] == pytest.approx(0.5 * mass * 0.01)
     mass, _, inertia = mass_properties([Box(size=(1, 2, 3))], 10.0)
     assert inertia[0, 0] == pytest.approx(mass * 13 / 12)
     assert Disk(radius=0.1, thickness=0.01).length == 0.01
-    assert Tube(radius=0.1, inner_radius=0.05, length=1).volume < Cylinder(radius=0.1, length=1).volume
+    assert (
+        Tube(radius=0.1, inner_radius=0.05, length=1).volume
+        < Cylinder(radius=0.1, length=1).volume
+    )
 
 
 def test_cylinder_between_aligns_axis():
@@ -42,7 +51,9 @@ def test_bike_defaults_and_only_pedals_move():
     crank = bike.getBodySet().get("crank_right")
     before = bike.getBodySet().get("seat").getPositionInGround(state)
     bike.crank_angle_deg = 90
-    assert bike.getBodySet().get("seat").getPositionInGround(bike.state).get(1) == pytest.approx(before.get(1))
+    assert bike.getBodySet().get("seat").getPositionInGround(bike.state).get(
+        1
+    ) == pytest.approx(before.get(1))
     tip = bike.getBodySet().get("pedal_right").getPositionInGround(bike.state)
     assert tip.get(1) == pytest.approx(0.25 + 0.17)
 
@@ -53,8 +64,10 @@ def test_bike_setters_density_and_steps():
     bike.frame_density = 2 * bike.frame_density
     assert bike.component_masses_kg["frame"] == pytest.approx(2 * iron)
     bike.seat_tube_step = 0
-    assert np.allclose(bike.seat_tube_top - bike.crank_axis_position,
-                       0.25 * np.array([-math.cos(math.radians(73)), math.sin(math.radians(73)), 0]))
+    assert np.allclose(
+        bike.seat_tube_top - bike.crank_axis_position,
+        0.25 * np.array([-math.cos(math.radians(73)), math.sin(math.radians(73)), 0]),
+    )
     with pytest.raises(ValueError):
         bike.seat_tube_step = 99
     with pytest.raises(ValueError):
@@ -64,9 +77,6 @@ def test_bike_setters_density_and_steps():
 
 
 def test_fit_user_places_user_on_bike():
-    import numpy as np
-    from opensim_extensions import User
-
     bike = Bike(stem_origin_mm=(600, 500, 0))
     user = User("M", height_cm=178)
     framework = bike.fit_user(user)
@@ -79,8 +89,6 @@ def test_fit_user_places_user_on_bike():
 
 
 def test_fit_user_trunk_angle_defines_handlebar():
-    import pytest
-    from opensim_extensions import User
 
     bike = Bike(
         stem_origin_mm=(500, 500, 0),

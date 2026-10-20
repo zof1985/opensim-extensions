@@ -1,10 +1,5 @@
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from opensim_extensions.opensim import register_geometry_search_path
 # DEFAULT_MODEL_PATH is User's bundled model, reused here as a real .osim
