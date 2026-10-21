@@ -12,6 +12,8 @@ di modelli e strumenti di visualizzazione ed esportazione.
   la postura.
 - **`Bike`**: modello OpenSim di una bike regolabile, con fitting di un utente,
   pedali, manubrio, schermo, supporto e sella arrotondata e rastremata.
+- **`GroupCycle3`**: configurazione predefinita di `Bike` con le geometrie e le
+  regolazioni del modello GroupCycle3.
 - **`Framework`**: contenitore nominativo di modelli OpenSim distinti, con
   snapshot composito, accoppiamenti e strumenti per simulare o creare un
   modello OpenSim indipendente.
@@ -123,6 +125,16 @@ fornito, il modello calibra la massa totale sul peso risolto dai riferimenti
 ANSUR II. Un'altezza esterna all'intervallo osservato può essere estrapolata e
 genera un `UserWarning`.
 
+Con `height_cm`, ogni misura viene ricavata con una regressione PCHIP per
+misura rispetto alla statura ANSUR; il percentile empirico risultante è
+informativo e non sostituisce l'altezza richiesta. Senza `height_cm`, il
+percentile comune viene calcolato indipendentemente per ciascuna misura
+numerica, non scegliendo un singolo individuo ANSUR. La scala di ogni segmento
+usa le misure ANSUR associate agli assi disponibili e il rapporto di statura
+come fallback per gli assi restanti. Dopo la scala geometrica, le masse e le
+inerzie sono ricalibrate uniformemente affinché la massa totale corrisponda a
+`mass_kg` o al peso risolto dai dati ANSUR.
+
 La property `height_cm` è espressa in centimetri; `mass_kg` è in
 chilogrammi. Le lunghezze e le circonferenze antropometriche esposte dalle
 property, i marker e le coordinate spaziali del modello seguono le unità SI di
@@ -180,6 +192,10 @@ sono busto a 45°, spalle a 75° e gomiti a 15°. L'utente predefinito è il
 riferimento maschile di 170 cm e 70 kg.
 Durante l'IK, flessione delle spalle e dei gomiti sono condivise tra i due
 lati; l'adduzione della spalla resta regolabile indipendentemente per lato.
+La relazione finale è disponibile in `bike.fit_report`; se la geometria
+selezionata non consente di raggiungere insieme gli obiettivi di altezza e
+posizione delle mani sul manubrio, il fitting mantiene il risultato ottenuto e
+genera un `UserWarning` con gli scostamenti.
 
 Gli angoli dei piantoni di `Bike` non si specificano: per piantone sella e
 piantone manubrio si indicano la tupla di inizio e fine dell'escursione
@@ -200,6 +216,9 @@ dello schermo si inclina con `screen_inclination_deg` (default 40).
 inclina i corni verso l'alto quando positivo; `horn_roll_deg` positivo li
 ruota medialmente, verso il piano centrale della bike. Questi angoli orientano
 i due corni individualmente: non è previsto un tilt globale del manubrio.
+Il default di `crank_axis_position_mm` è `(0, 322, 0)` mm. `GroupCycle3` è una
+sottoclasse preconfigurata di `Bike` che imposta le specifiche del modello,
+inclusa questa posizione dell'asse.
 
 Il fitting centra il punto medio tra i marker `TOE` e `MT5` sul centro del
 pedale e ne imposta la distanza dalla superficie del pedale, misurata lungo
@@ -405,14 +424,16 @@ composite = framework.composite
 standalone_model = framework.merge_to_model()
 ```
 
-`initSystem()` crea uno snapshot composito: i modelli conservati nel framework
-restano separati. Modifiche applicate direttamente a un membro, ad esempio
+`initSystem()` ricostruisce e inizializza uno snapshot composito: i modelli
+conservati nel framework restano separati. Modifiche applicate direttamente a un membro, ad esempio
 `framework["user"].set_neck_flexion(30)`, aggiornano quel modello; una nuova
 chiamata a `merge_to_model()` legge lo stato corrente dei membri e crea un
 nuovo `opensim.Model` indipendente. Uno snapshot composito già inizializzato
 non riceve invece notifiche automatiche: chiamare nuovamente `initSystem()`
-per ricostruirlo. Dopo aver modificato lo stato del composito, `update_state()`
-trasferisce coordinate e velocità ai modelli membri. I parametri `only`,
+per ricostruirlo. `forward()` e `settle_under_gravity()` sincronizzano i
+risultati sui modelli membri; dopo aver modificato manualmente lo stato del
+composito, chiamare `update_state()` per trasferire coordinate e velocità.
+I parametri `only`,
 `exclude` e `include_couplings` di `merge_to_model()` permettono di selezionare
 i membri e gli accoppiamenti da includere.
 
@@ -482,16 +503,20 @@ viewer.save_animation(
 controllo della riproduzione. Sono supportati i modelli OpenSim e gli oggetti
 `Framework`; un framework viene visualizzato come snapshot composito. Le
 tabelle di movimento possono essere passate come percorso `.mot`/`.sto` o
-come `opensim.TimeSeriesTable`. Nel gruppo View, i controlli `Vision cone +
-axis` e `Reachability` mostrano o nascondono i rispettivi overlay; risultano
-disabilitati quando il modello non contiene quegli elementi.
+come `opensim.TimeSeriesTable` con almeno due campioni. I controlli della
+finestra permettono di riprodurre, fermare, scorrere e ripetere la motion,
+selezionare viste camera preimpostate e mostrare/nascondere terreno, muscoli,
+marker, assi XYZ, cono visivo e regioni di raggiungibilità. I controlli degli
+overlay non disponibili sono disabilitati quando il modello non li contiene.
 
 `save_snapshot()` esporta un'immagine **SVG** o **PNG** senza aprire una
 finestra, in base all'estensione del percorso. Per i PNG, `dpi` imposta i DPI
 registrati nei metadati (default 300); non cambia le dimensioni in pixel,
 configurabili con `size`. `frame` seleziona una riga della tabella di movimento
 e `time_s` interpola la posa al tempo indicato. Senza una tabella, viene usata
-la posa corrente. `camera_position`, `camera_focal_point` e `camera_view_up`
+la posa corrente; se sono forniti entrambi, `frame` ha precedenza su `time_s`.
+L'esportazione non modifica la posa del modello sorgente.
+`camera_position`, `camera_focal_point` e `camera_view_up`
 posizionano la camera e il suo punto di osservazione in coordinate mondo
 espresse in metri; se omessi, viene usata la vista inquadrata automaticamente.
 I flag booleani `show_ground`, `show_axes`, `show_muscles`, `show_markers`,
@@ -501,9 +526,17 @@ sono tutti attivi per default. Le altre estensioni non sono supportate.
 `save_animation()` esporta un video **MP4** off-screen e ripristina i valori
 delle coordinate del modello dopo il rendering. Accetta le stesse opzioni di
 camera e visibilità di `save_snapshot()`; `size` configura le dimensioni dei
-fotogrammi. Se si specifica una qualsiasi opzione di camera, i vettori omessi
-mantengono i valori automatici correnti. Anche `User.show()` e `Framework.show()`
-offrono l'apertura rapida del visualizzatore.
+fotogrammi e larghezza/altezza devono essere interi positivi pari. Il frame
+rate è derivato dall'intervallo temporale della motion, che viene campionata
+uniformemente; sono applicate le colonne corrispondenti a coordinate del
+modello, comprese le etichette `/coordinate/value` delle states table.
+`save_animation()` è anche una funzione pubblica di primo livello:
+`save_animation(model, table, path, ...)` accetta un modello OpenSim, una
+tabella o un percorso motion e la destinazione MP4. Il metodo
+`VTKViewer.save_animation()` accetta inoltre un `Framework`. Se si specifica
+una qualsiasi opzione di camera, i vettori omessi mantengono i valori
+automatici correnti. Anche `User.show()` e `Framework.show()` offrono
+l'apertura rapida del visualizzatore.
 
 ## Test
 
@@ -515,15 +548,20 @@ python -m pytest
 ```
 
 In VS Code selezionare l'interprete dell'ambiente che contiene OpenSim e
-impostare pytest come framework di test Python; la discovery è configurata
-anche in `.vscode/settings.json`.
+impostare pytest come framework di test Python.
 
 ## API pubblica
 
-Gli elementi principali esportati da `opensim_extensions` sono:
-`User`, `Bike`, `Framework`, `save_animation`, `VTKViewer`, `VTKVisualizer`,
-`MotionData`, `MotionPlayer`, `PlayerWindow`, `DEFAULT_SIZE` e `VIEW_NAMES`.
-Le primitive geometriche e gli helper per creare corpi OpenSim sono esposti
-nel sottopackage `opensim_extensions.bodies`, ad esempio
+Gli elementi inclusi nell'API di wildcard `opensim_extensions` (`__all__`) sono:
+`User`, `Bike`, `IRON_DENSITY_KG_M3`, `Framework`, `save_animation`,
+`VTKViewer`, `VTKVisualizer`, `MotionData`, `MotionPlayer`, `PlayerWindow`,
+`DEFAULT_SIZE` e `VIEW_NAMES`.
+`GroupCycle3`, `Equipment` e `Screen` sono disponibili nel sottopackage
+`opensim_extensions.models.equipment`; `VisualErgonomicsFramework` è esposto
+da `opensim_extensions.framework`. Le primitive geometriche e gli helper per
+creare corpi OpenSim sono esposti nel sottopackage `opensim_extensions.bodies`, ad esempio
 `Box`, `Cylinder`, `Disk`, `Ellipsoid`, `Sphere`, `Tube` e
 `mass_properties`.
+Le primitive sono espresse in unità SI e i builder forniscono helper per
+calcolare proprietà di massa e aggiungere corpi saldati o articolati a modelli
+OpenSim.
