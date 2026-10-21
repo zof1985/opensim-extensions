@@ -94,12 +94,6 @@ def _point_range(
     return _point(name, value[0]), _point(name, value[1])
 
 
-def _polar(angle_deg: float, length_mm: float) -> tuple[float, float]:
-    """Return the (x, y) point at ``length_mm`` from the origin along ``angle_deg``."""
-    angle = math.radians(angle_deg)
-    return length_mm * math.cos(angle), length_mm * math.sin(angle)
-
-
 def _range_angle_deg(value: tuple[tuple[float, float], tuple[float, float]]) -> float:
     """Directed XY angle from +X of the start-to-end segment (deg)."""
     return math.degrees(

@@ -20,7 +20,6 @@ opensim = import_opensim()
 
 _TOLERANCE_M = 5e-3
 _BOTTOM_ANGLES = np.radians(np.arange(0.0, 360.0, 1.0))
-_FLEXION_TARGET_DEG = 90.0
 _FOOT_AXIS_ALIGNMENT_WEIGHT = 0.038
 _FOOT_PLANE_ALIGNMENT_WEIGHT = 0.9
 _PRESERVED_POSTURE_COORDINATES = (
@@ -595,7 +594,6 @@ def fit_user(
     rider = _Rider(user)
     crotch_height = user._reference.values["crotchheight"] * 1e-3
     seat_lift = np.array([0.0, bike._seat_height_mm * 1e-3 / 2, 0.0])
-    report: dict[str, Any] = {}
 
     tube_step = _choose_tube_step(bike, crotch_height + shoe)
     bike.set_seat_tube_step(tube_step)

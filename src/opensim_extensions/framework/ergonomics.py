@@ -118,12 +118,32 @@ def _pyramid_mesh(
     ]
 
 
-def _sphere_mesh(
-    radius: float, latitude_steps: int = 12, longitude_steps: int = 24
+def _spherical_cap_mesh(
+    radius: float,
+    axis_direction: np.ndarray,
+    half_angle_deg: float,
+    latitude_steps: int = 12,
+    longitude_steps: int = 24,
 ) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
+    axis = np.asarray(axis_direction, dtype=float)
+    axis_length = float(np.linalg.norm(axis))
+    if (
+        not math.isfinite(radius)
+        or radius <= 0.0
+        or not math.isfinite(axis_length)
+        or axis_length <= 1e-12
+        or not math.isfinite(half_angle_deg)
+        or not 0.0 < half_angle_deg <= 180.0
+        or latitude_steps < 1
+        or longitude_steps < 3
+    ):
+        raise ValueError("invalid spherical-cap geometry")
+    axis = axis / axis_length
+
     points = [(0.0, radius, 0.0)]
-    for latitude in range(1, latitude_steps):
-        polar = math.pi * latitude / latitude_steps
+    cap_angle = math.radians(half_angle_deg)
+    for latitude in range(1, latitude_steps + 1):
+        polar = cap_angle * latitude / latitude_steps
         for longitude in range(longitude_steps):
             azimuth = 2 * math.pi * longitude / longitude_steps
             points.append(
@@ -133,8 +153,7 @@ def _sphere_mesh(
                     radius * math.sin(polar) * math.sin(azimuth),
                 )
             )
-    south_pole = len(points)
-    points.append((0.0, -radius, 0.0))
+
     faces = []
     first_ring = 1
     for longitude in range(longitude_steps):
@@ -142,7 +161,7 @@ def _sphere_mesh(
         faces.append(
             (0, first_ring + longitude, first_ring + next_longitude)
         )
-    for latitude in range(latitude_steps - 2):
+    for latitude in range(latitude_steps - 1):
         ring = 1 + latitude * longitude_steps
         next_ring = ring + longitude_steps
         for longitude in range(longitude_steps):
@@ -153,13 +172,31 @@ def _sphere_mesh(
                     (ring + longitude, next_ring + next_longitude, ring + next_longitude),
                 )
             )
-    last_ring = 1 + (latitude_steps - 2) * longitude_steps
-    for longitude in range(longitude_steps):
-        next_longitude = (longitude + 1) % longitude_steps
-        faces.append(
-            (south_pole, last_ring + next_longitude, last_ring + longitude)
+
+    source_axis = np.array([0.0, 1.0, 0.0])
+    cross = np.cross(source_axis, axis)
+    sine = float(np.linalg.norm(cross))
+    cosine = float(np.dot(source_axis, axis))
+    if sine <= 1e-12:
+        rotation = (
+            np.eye(3)
+            if cosine >= 0.0
+            else np.diag([1.0, -1.0, -1.0])
         )
-    return np.asarray(points, dtype=float), faces
+    else:
+        skew = np.array(
+            [
+                [0.0, -cross[2], cross[1]],
+                [cross[2], 0.0, -cross[0]],
+                [-cross[1], cross[0], 0.0],
+            ]
+        )
+        rotation = (
+            np.eye(3)
+            + skew
+            + skew @ skew * ((1.0 - cosine) / (sine * sine))
+        )
+    return np.asarray(points, dtype=float) @ rotation.T, faces
 
 
 def _rotation_in_ground(frame: Any, state: Any) -> np.ndarray:
@@ -485,7 +522,7 @@ class VisualErgonomicsFramework(Framework):
         """Compute smooth objective scores for one candidate screen pose.
 
         Incidence is normalized to a score in ``[0, 1]``. Visual-cone margins
-        and signed distances from each shoulder-centred reach sphere are converted
+        and signed distances from each shoulder-centred hand-contact sphere are converted
         through logistic functions, giving the optimizer smooth
         approximations to the visible and reachable sample fractions.
 
@@ -522,7 +559,7 @@ class VisualErgonomicsFramework(Framework):
 
         reachable_probabilities = []
         for side in ("r", "l"):
-            center, radius = self._reachability_sphere(side)
+            center, radius = self._screen_contact_sphere(side)
             violation = np.linalg.norm(points - center, axis=1) - radius
             reachable_probabilities.append(
                 expit(-violation / _REACHABILITY_SCORE_SCALE_M)
@@ -718,7 +755,7 @@ class VisualErgonomicsFramework(Framework):
     def _reachable_screen_samples(self, screen_points: np.ndarray) -> np.ndarray:
         reachable = []
         for side in ("r", "l"):
-            center, radius = self._reachability_sphere(side)
+            center, radius = self._screen_contact_sphere(side)
             reachable.append(
                 np.linalg.norm(screen_points - center, axis=1) <= radius + 1e-8
             )
@@ -733,16 +770,26 @@ class VisualErgonomicsFramework(Framework):
         radius = float(np.max(np.linalg.norm(points - shoulder, axis=1)))
         return shoulder, radius
 
+    def _screen_contact_sphere(self, side: str) -> tuple[np.ndarray, float]:
+        """Return a hand-contact reach sphere for screen coverage metrics."""
+        shoulder, palm_center_radius = self._reachability_sphere(side)
+        side_name = "right" if side == "r" else "left"
+        palm_length = float(getattr(self.user, f"{side_name}_palm_length"))
+        hand_length = float(self.user.anthropometry.values["handlength"]) * 1e-3
+        contact_extension = hand_length - palm_length / 2
+        if not math.isfinite(contact_extension) or contact_extension < 0.0:
+            raise ValueError("hand length must extend beyond the palm-centre marker")
+        return shoulder, palm_center_radius + contact_extension
+
     def get_view_state(self) -> dict[str, float]:
         """Measure screen incidence, visual coverage, and hand reachability.
 
         Incidence is the angle between the screen normal and the line from the
         midpoint of the eye markers to the screen centre. Visibility and
         reachability percentages are sampled on a uniform screen grid.
-        Reachability is the union of spheres centred at the shoulder joints.
-        Each sphere radius is the greatest shoulder-to-palm distance sampled
-        with the elbow fully extended. Trunk and pelvis coordinates remain at
-        their current values.
+        Reachability is the union of shoulder-centred spheres extended from
+        the palm-centre marker to the hand's distal endpoint. Trunk and pelvis
+        coordinates remain at their current values.
 
         Returns
         -------
@@ -750,9 +797,44 @@ class VisualErgonomicsFramework(Framework):
             Mapping with ``incidence_angle_deg`` (degrees),
             ``observed_screen_percent`` (visible grid fraction), and
             ``reachable_screen_percent`` (fraction inside either shoulder-
-            centred reach sphere). Percentages are in ``[0, 100]``.
+            centred contact sphere), plus trunk, shoulder, elbow, neck-base,
+            and head flexion angles in degrees.
         """
-        return self._metrics()
+        centers = self.user.joint_centers
+        hips = (
+            np.asarray(centers["right_hip"], dtype=float)
+            + np.asarray(centers["left_hip"], dtype=float)
+        ) / 2
+        shoulders = (
+            np.asarray(centers["right_shoulder"], dtype=float)
+            + np.asarray(centers["left_shoulder"], dtype=float)
+        ) / 2
+        trunk_axis = shoulders - hips
+        if float(np.linalg.norm(trunk_axis)) <= 1e-12:
+            raise ValueError("the shoulder and hip centres must be distinct")
+        horizontal_magnitude = math.hypot(
+            float(trunk_axis[0]), float(trunk_axis[2])
+        )
+        trunk_angle_from_horizontal = math.degrees(
+            math.atan2(float(trunk_axis[1]), horizontal_magnitude)
+        )
+        view_state = self._metrics()
+        view_state.update(
+            {
+                "trunk_angle_from_horizontal_deg": trunk_angle_from_horizontal,
+                "right_shoulder_flexion_deg": float(
+                    self.user.right_shoulder_flexion
+                ),
+                "left_shoulder_flexion_deg": float(
+                    self.user.left_shoulder_flexion
+                ),
+                "right_elbow_flexion_deg": float(self.user.right_elbow_flexion),
+                "left_elbow_flexion_deg": float(self.user.left_elbow_flexion),
+                "neck_base_flexion_deg": float(self.user.neck_base_flexion),
+                "head_flexion_deg": float(self.user.neck_flexion),
+            }
+        )
+        return view_state
 
     def _screen_constraints(self, position: Sequence[float]) -> np.ndarray:
         return self.equipment.screen_position_constraints(
@@ -843,563 +925,348 @@ class VisualErgonomicsFramework(Framework):
 
         return user, self.equipment.clone()
 
-    def _coordinate_ranges(
-        self,
-        coordinate_ranges_deg: Mapping[str, Sequence[float]] | None,
-        neck_flexionextension_range_deg: Sequence[float] | None,
-        head_extensionflexion_range_deg: Sequence[float] | None,
-        trunk_flexionextension_range_deg: Sequence[float] | None,
-        shoulder_flexion_range_deg: Sequence[float] | None,
-        elbow_flexion_range_deg: Sequence[float] | None,
-    ) -> dict[str, tuple[float, float]]:
-        result: dict[str, tuple[float, float]] = {}
-        aliases = (
-            (neck_flexionextension_range_deg, "neck_base_flexion"),
-            (head_extensionflexion_range_deg, "neck_flexion"),
-            (trunk_flexionextension_range_deg, "lumbar_extension"),
-        )
-        for bounds, name in aliases:
-            if bounds is not None:
-                result[name] = self._range(f"{name} range", bounds)
-        if shoulder_flexion_range_deg is not None:
-            result.update(
-                {
-                    f"arm_flex_{side}": self._range(
-                        "shoulder_flexion_range_deg", shoulder_flexion_range_deg
-                    )
-                    for side in ("r", "l")
-                }
-            )
-        if elbow_flexion_range_deg is not None:
-            result.update(
-                {
-                    f"elbow_flex_{side}": self._range(
-                        "elbow_flexion_range_deg", elbow_flexion_range_deg
-                    )
-                    for side in ("r", "l")
-                }
-            )
-        for name, bounds in (coordinate_ranges_deg or {}).items():
-            self._range(f"coordinate_ranges_deg[{name!r}]", bounds)
-            result[name] = tuple(map(float, bounds))
-        coordinates = self.user.getCoordinateSet()
-        for name, (low, high) in result.items():
-            try:
-                coordinate = coordinates.get(name)
-            except RuntimeError as error:
-                raise ValueError(f"unknown user coordinate {name!r}") from error
-            allowed = (
-                math.degrees(coordinate.getRangeMin()),
-                math.degrees(coordinate.getRangeMax()),
-            )
-            if low < allowed[0] or high > allowed[1]:
-                warnings.warn(
-                    f"{name} range {(low, high)} exceeds model limits {allowed}; "
-                    "expanding the model limits to include it",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                coordinate.setRangeMin(math.radians(min(low, allowed[0])))
-                coordinate.setRangeMax(math.radians(max(high, allowed[1])))
-        return result
-
     def optimize_screen_position(
         self,
         *,
-        incidence_weight: float = 0.34,
-        observed_screen_weight: float = 0.33,
-        reachability_weight: float = 0.33,
         inplace: bool = False,
-        neck_flexionextension_range_deg: Sequence[float] | None = (-30.0, 30.0),
-        head_extensionflexion_range_deg: Sequence[float] | None = (0.0, 0.0),
-        trunk_flexionextension_range_deg: Sequence[float] | None = None,
-        shoulder_flexion_range_deg: Sequence[float] | None = None,
-        elbow_flexion_range_deg: Sequence[float] | None = None,
         screen_incline_range_deg: Sequence[float] | None = None,
         screen_horizontal_offset_range_mm: Sequence[float] | None = None,
         screen_vertical_offset_range_mm: Sequence[float] | None = None,
-        coordinate_ranges_deg: Mapping[str, Sequence[float]] | None = None,
         screen_horizontal_offset_mm: float | tuple[float, float] | None = None,
         screen_vertical_offset_mm: float | tuple[float, float] | None = None,
         screen_inclination_deg: float | tuple[float, float] | None = None,
-        coordinate_parameters_deg: Mapping[
-            str, OptimizationParameter
-        ]
-        | None = None,
-        _neck_flexion_weight: float | None = None,
-        max_iterations: int = 100,
     ) -> Self | None:
-        """Optimize screen position and selected rider coordinates.
+        """Position the screen geometrically without changing the user pose.
 
-        The objective combines screen incidence, visibility within the visual
-        cone, and palm-marker reachability. The incidence score also penalizes
-        misalignment between the gaze axis and the eye-to-screen-centre line.
-        A bounded numerical optimization evaluates the screen on a regular
-        grid; the palm reachability objective uses the extended-arm hulls
-        independently of any fitted grip posture.
-        By default only neck-base flexion/extension is free to change; the
-        trunk, shoulders, and elbows remain at their current posture unless
-        corresponding ranges are supplied.
+        The panel is first oriented perpendicular to the user's current line of
+        sight. Its centre is then placed on the forward ray from the eyes, at
+        the closest feasible distance to the current screen centre, while every
+        corner remains within at least one shoulder's fully extended reach
+        sphere. Supplied offset ranges restrict the geometric solution; scalar
+        offset or inclination values fix that parameter. Unspecified offsets
+        are free except for equipment placement constraints.
+
         If ``inplace`` is false, model copies are optimized and the original
         framework remains unchanged.
 
         Parameters
         ----------
-        incidence_weight : float, default=0.34
-            Weight of perpendicular screen incidence in the objective.
-        observed_screen_weight : float, default=0.33
-            Weight of the screen fraction inside the visual cone.
-        reachability_weight : float, default=0.33
-            Weight of the screen fraction inside either palm-marker reach hull.
         inplace : bool, default=False
             If true, modify this framework and return ``None``; otherwise
             optimize independent copies and return the new framework.
-        neck_flexionextension_range_deg : sequence of float or None, optional
-            Inclusive lower and upper bounds for neck-base flexion/extension.
-            Defaults to ``(-30, 30)`` degrees; ``None`` leaves the coordinate
-            at its current value.
-        head_extensionflexion_range_deg : sequence of float or None, optional
-            Bounds for head flexion/extension in degrees. Defaults to
-            ``(0, 0)``, keeping the head coordinate neutral.
-        trunk_flexionextension_range_deg : sequence of float or None, optional
-            Bounds for lumbar flexion/extension in degrees; ``None`` leaves
-            the coordinate at its current value.
-        shoulder_flexion_range_deg : sequence of float or None, optional
-            Shared bounds for both shoulder flexion coordinates, in degrees;
-            ``None`` leaves them at their current values.
-        elbow_flexion_range_deg : sequence of float or None, optional
-            Shared bounds for both elbow flexion coordinates, in degrees.
-            These bounds affect the fitted rider posture, not the separate
-            reachability envelope, which always uses fully extended elbows.
         screen_incline_range_deg : sequence of float or None, optional
-            Legacy inclusive bounds for screen inclination in degrees.
-        screen_horizontal_offset_range_mm : sequence of float or None, optional
-            Legacy bounds for the screen's forward offset from its equipment
-            reference point, in millimetres. If omitted, the current value is
-            fixed unless ``screen_horizontal_offset_mm`` is supplied.
-        screen_vertical_offset_range_mm : sequence of float or None, optional
-            Legacy bounds for the screen's vertical offset from its equipment
-            reference point, in millimetres. If omitted, the current value is
-            fixed unless ``screen_vertical_offset_mm`` is supplied.
-        coordinate_ranges_deg : mapping of str to sequence of float, optional
-            Legacy coordinate-name to ``(minimum, maximum)`` bounds, in
-            degrees, for user coordinates not covered by the dedicated range
-            arguments.
+            Inclusive bounds for the inclination required to make the screen
+            plane perpendicular to the line of sight.
+        screen_horizontal_offset_range_mm, screen_vertical_offset_range_mm :
+        sequence of float or None, optional
+            Inclusive bounds for the corresponding screen offsets, in
+            millimetres.
         screen_horizontal_offset_mm, screen_vertical_offset_mm : float, tuple,
         or None, optional
-            Screen offset values in millimetres. ``None`` keeps the current
-            value, a float fixes the value, and a tuple sets the inclusive
-            optimization bounds.
+            A float fixes an offset, a tuple constrains it to an inclusive
+            range, and ``None`` leaves it free subject to equipment limits.
         screen_inclination_deg : float, tuple, or None, optional
-            Screen inclination in degrees. ``None`` keeps the current value,
-            a float fixes the value, and a tuple sets the inclusive
-            optimization bounds.
-        coordinate_parameters_deg : mapping, optional
-            Mapping of user coordinate names to ``None``, a fixed value in
-            degrees, or an inclusive optimization range in degrees. Omitted
-            coordinates remain fixed. Values outside model limits expand the
-            coordinate limits with a warning.
-        max_iterations : int, default=100
-            Maximum number of iterations for the numerical optimizer.
+            A float fixes inclination, a tuple constrains it to an inclusive
+            range, and ``None`` uses the geometrically required inclination.
 
         Returns
         -------
         VisualErgonomicsFramework or None
-            The optimized framework when ``inplace=False``; ``None`` when
+            The positioned framework when ``inplace=False``; ``None`` when
             ``inplace=True``.
 
         Raises
         ------
         TypeError
-            If ``inplace`` is not boolean.
+            If ``inplace`` or a screen parameter has an invalid type.
         ValueError
-            If weights are invalid, parameter values or bounds are invalid,
-            the screen is unavailable, or no feasible position exists.
+            If the line of sight cannot be represented by the screen model,
+            the required pose violates supplied bounds, or no position places
+            every screen corner within arm reach and equipment constraints.
         """
-        weight_values = [
-            incidence_weight,
-            observed_screen_weight,
-            reachability_weight,
-        ]
-        if _neck_flexion_weight is not None:
-            weight_values.append(_neck_flexion_weight)
-        weights = np.array(weight_values, dtype=float)
-        if (
-            not np.all(np.isfinite(weights))
-            or np.any(weights < 0.0)
-            or np.any(weights > 1.0)
-            or not math.isclose(float(weights.sum()), 1.0, abs_tol=1e-8)
-        ):
-            raise ValueError("objective weights must be in [0, 1] and sum to 1")
-        screen_weights = weights[:3]
-        neck_weight = weights[3] if len(weights) == 4 else 0.0
         if not isinstance(inplace, bool):
             raise TypeError("inplace must be bool")
-        if not isinstance(max_iterations, int) or max_iterations < 1:
-            raise ValueError("max_iterations must be a positive integer")
 
         target: VisualErgonomicsFramework
         if inplace:
             target = self
         else:
-            cloned_user, cloned_bike = self._clone_models()
+            cloned_user, cloned_equipment = self._clone_models()
             target = type(self)(
                 cloned_user,
-                cloned_bike,
+                cloned_equipment,
                 self.cone_width_angle_deg,
                 self.cone_height_angle_deg,
                 self.line_of_sight_offset_deg,
             )
-        palm_reference = target._palm_marker_positions()
-
-        coordinate_ranges = target._coordinate_ranges(
-            coordinate_ranges_deg,
-            neck_flexionextension_range_deg,
-            head_extensionflexion_range_deg,
-            trunk_flexionextension_range_deg,
-            shoulder_flexion_range_deg,
-            elbow_flexion_range_deg,
-        )
-        for name, value in (coordinate_parameters_deg or {}).items():
-            try:
-                coordinate = target.user.getCoordinateSet().get(name)
-            except RuntimeError as error:
-                raise ValueError(f"unknown user coordinate {name!r}") from error
-            if value is None:
-                coordinate_ranges.pop(name, None)
-                continue
-            current = math.degrees(
-                coordinate.getValue(target._user_state())
-            )
-            allowed = (
-                math.degrees(coordinate.getRangeMin()),
-                math.degrees(coordinate.getRangeMax()),
-            )
-            bounds = target._parameter_bounds(
-                f"coordinate_parameters_deg[{name!r}]",
-                value,
-                current,
-                allowed,
-            )
-            if bounds[0] < allowed[0]:
-                coordinate.setRangeMin(math.radians(bounds[0]))
-            if bounds[1] > allowed[1]:
-                coordinate.setRangeMax(math.radians(bounds[1]))
-            coordinate_ranges[name] = bounds
 
         screen = target.screen
-        screen_inputs = (
-            (
-                "screen_horizontal_offset_mm",
-                screen_horizontal_offset_mm,
-                screen_horizontal_offset_range_mm,
-                screen.horizontal_offset_mm,
-                screen.horizontal_offset_min_mm,
-            ),
-            (
-                "screen_vertical_offset_mm",
-                screen_vertical_offset_mm,
-                screen_vertical_offset_range_mm,
-                screen.vertical_offset_mm,
-                screen.vertical_offset_min_mm,
-            ),
-            (
-                "screen_inclination_deg",
-                screen_inclination_deg,
-                screen_incline_range_deg,
-                screen.inclination_deg,
-                -math.inf,
-            ),
-        )
-        screen_ranges: dict[str, tuple[float, float]] = {}
-        for name, value, legacy_range, current, minimum in screen_inputs:
-            if value is not None and legacy_range is not None:
-                raise ValueError(
-                    f"specify either {name} or its legacy range, not both"
-                )
-            allowed = (
-                minimum if minimum is not None else -math.inf,
-                math.inf,
+        eye, visual_rotation = target._eye_center_and_line_of_sight_rotation()
+        gaze = np.asarray(visual_rotation[:, 0], dtype=float)
+        gaze_norm = float(np.linalg.norm(gaze))
+        if not math.isfinite(gaze_norm) or gaze_norm <= 1e-12:
+            raise ValueError("the user's line-of-sight direction is undefined")
+        gaze /= gaze_norm
+        if abs(float(gaze[2])) > 1e-8:
+            raise ValueError(
+                "the screen model cannot be oriented perpendicular to a line "
+                "of sight with a lateral component"
             )
+        horizontal_gaze_norm = float(np.linalg.norm(gaze[:2]))
+        if horizontal_gaze_norm <= 1e-12:
+            raise ValueError("the screen model cannot represent this line of sight")
+        gaze[:2] /= horizontal_gaze_norm
+        gaze[2] = 0.0
+
+        panel_up = np.array([-gaze[1], gaze[0], 0.0])
+        if panel_up[1] < -1e-12 or (
+            abs(float(panel_up[1])) <= 1e-12 and panel_up[0] < 0.0
+        ):
+            panel_up *= -1.0
+        required_inclination = math.degrees(
+            math.atan2(float(panel_up[1]), float(panel_up[0]))
+        )
+        if screen_inclination_deg is not None and screen_incline_range_deg is not None:
+            raise ValueError(
+                "specify either screen_inclination_deg or "
+                "screen_incline_range_deg, not both"
+            )
+        if screen_inclination_deg is not None:
+            if isinstance(screen_inclination_deg, bool):
+                raise TypeError(
+                    "screen_inclination_deg must be a float or a tuple of two floats"
+                )
+            if isinstance(screen_inclination_deg, (int, float, np.integer, np.floating)):
+                inclination_bounds = (
+                    float(screen_inclination_deg),
+                    float(screen_inclination_deg),
+                )
+            elif isinstance(screen_inclination_deg, tuple):
+                inclination_bounds = target._range(
+                    "screen_inclination_deg", screen_inclination_deg
+                )
+            else:
+                raise TypeError(
+                    "screen_inclination_deg must be a float or a tuple of two floats"
+                )
+        elif screen_incline_range_deg is not None:
+            inclination_bounds = target._range(
+                "screen_incline_range_deg", screen_incline_range_deg
+            )
+        else:
+            inclination_bounds = None
+        if inclination_bounds is not None and not (
+            inclination_bounds[0] - 1e-8
+            <= required_inclination
+            <= inclination_bounds[1] + 1e-8
+        ):
+            raise ValueError(
+                "the required screen inclination for perpendicular incidence "
+                "is outside the requested bounds"
+            )
+
+        offset_expansions: dict[str, float | None] = {}
+
+        def offset_bounds(
+            name: str,
+            value: float | tuple[float, float] | None,
+            legacy_range: Sequence[float] | None,
+            equipment_minimum: float | None,
+        ) -> tuple[float, float]:
+            if value is not None and legacy_range is not None:
+                raise ValueError(f"specify either {name} or its range, not both")
+            if value is None and legacy_range is None:
+                return (
+                    equipment_minimum if equipment_minimum is not None else -math.inf,
+                    math.inf,
+                )
             if value is not None:
-                bounds = target._parameter_bounds(name, value, current, allowed)
-            elif legacy_range is not None:
-                bounds = target._range(name, legacy_range)
-                if bounds[0] < allowed[0]:
-                    warnings.warn(
-                        f"{name} range {bounds} is below the current limit "
-                        f"{allowed[0]}; expanding the limit to include it",
-                        UserWarning,
-                        stacklevel=2,
+                if isinstance(value, bool):
+                    raise TypeError(f"{name} must be a float or a tuple of two floats")
+                if isinstance(value, (int, float, np.integer, np.floating)):
+                    bounds = (float(value), float(value))
+                elif isinstance(value, tuple):
+                    bounds = target._range(name, value)
+                else:
+                    raise TypeError(f"{name} must be a float or a tuple of two floats")
+            else:
+                bounds = target._range(f"{name} range", legacy_range)
+            if not all(math.isfinite(bound) for bound in bounds):
+                raise ValueError(f"{name} bounds must be finite")
+            if equipment_minimum is not None and bounds[0] < equipment_minimum:
+                warnings.warn(
+                    f"{name} bounds {bounds} are below the current limit "
+                    f"{equipment_minimum}; expanding the limits to include them",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                offset_expansions[name] = bounds[0]
+            else:
+                offset_expansions[name] = None
+            return bounds
+
+        horizontal_bounds = offset_bounds(
+            "screen_horizontal_offset_mm",
+            screen_horizontal_offset_mm,
+            screen_horizontal_offset_range_mm,
+            screen.horizontal_offset_min_mm,
+        )
+        vertical_bounds = offset_bounds(
+            "screen_vertical_offset_mm",
+            screen_vertical_offset_mm,
+            screen_vertical_offset_range_mm,
+            screen.vertical_offset_min_mm,
+        )
+
+        current_horizontal = screen.horizontal_offset_mm
+        current_vertical = screen.vertical_offset_mm
+        reference_center = screen.corners(
+            (current_horizontal, current_vertical, required_inclination)
+        ).mean(axis=0)
+        if abs(float(reference_center[2] - eye[2])) > 1e-8:
+            raise ValueError(
+                "the screen's fixed lateral position does not intersect the "
+                "line of sight"
+            )
+
+        def pose_at(distance: float) -> tuple[float, float, float]:
+            centre = eye + distance * gaze
+            return (
+                current_horizontal + float(centre[0] - reference_center[0]) * 1000.0,
+                current_vertical + float(centre[1] - reference_center[1]) * 1000.0,
+                required_inclination,
+            )
+
+        distance_bounds = [0.0, math.inf]
+
+        def constrain_linear(
+            base: float, slope: float, bounds: tuple[float, float]
+        ) -> bool:
+            if abs(slope) <= 1e-12:
+                return bounds[0] - 1e-9 <= base <= bounds[1] + 1e-9
+            first = (bounds[0] - base) / slope
+            second = (bounds[1] - base) / slope
+            distance_bounds[0] = max(distance_bounds[0], min(first, second))
+            distance_bounds[1] = min(distance_bounds[1], max(first, second))
+            return distance_bounds[0] <= distance_bounds[1] + 1e-9
+
+        if not constrain_linear(
+            current_horizontal
+            + float(eye[0] - reference_center[0]) * 1000.0,
+            float(gaze[0]) * 1000.0,
+            horizontal_bounds,
+        ) or not constrain_linear(
+            current_vertical + float(eye[1] - reference_center[1]) * 1000.0,
+            float(gaze[1]) * 1000.0,
+            vertical_bounds,
+        ):
+            raise ValueError("no screen position satisfies the requested offset bounds")
+
+        margins_at_zero = target._screen_constraints(pose_at(0.0))
+        margins_at_one = target._screen_constraints(pose_at(1.0))
+        if (
+            not np.all(np.isfinite(margins_at_zero))
+            or margins_at_zero.shape != margins_at_one.shape
+            or not np.all(np.isfinite(margins_at_one))
+        ):
+            raise ValueError("equipment returned invalid screen-placement constraints")
+        margin_slopes = margins_at_one - margins_at_zero
+        for margin, slope in zip(margins_at_zero, margin_slopes):
+            if abs(float(slope)) <= 1e-12:
+                if margin < -1e-9:
+                    raise ValueError(
+                        "no screen position on the line of sight satisfies "
+                        "the equipment placement constraints"
                     )
             else:
-                bounds = (current, current)
-            screen_ranges[name] = bounds
+                boundary = -float(margin) / float(slope)
+                if slope > 0.0:
+                    distance_bounds[0] = max(distance_bounds[0], boundary)
+                else:
+                    distance_bounds[1] = min(distance_bounds[1], boundary)
+        if distance_bounds[0] > distance_bounds[1] + 1e-9:
+            raise ValueError(
+                "no screen position on the line of sight satisfies the "
+                "equipment placement and offset constraints"
+            )
+
+        corners_at_reference = screen.corners(
+            (current_horizontal, current_vertical, required_inclination)
+        )
+        corner_offsets = corners_at_reference - reference_center
+        reach_spheres = [
+            target._reachability_sphere(side) for side in ("r", "l")
+        ]
+        corner_intervals: list[list[tuple[float, float]]] = []
+        for corner_offset in corner_offsets:
+            intervals = []
+            for shoulder, radius in reach_spheres:
+                delta = eye + corner_offset - shoulder
+                projection = float(np.dot(delta, gaze))
+                discriminant = projection * projection + float(radius) ** 2 - float(
+                    np.dot(delta, delta)
+                )
+                if discriminant < -1e-12:
+                    continue
+                half_width = math.sqrt(max(0.0, discriminant))
+                intervals.append(
+                    (-projection - half_width, -projection + half_width)
+                )
+            if not intervals:
+                raise ValueError(
+                    "at least one screen corner cannot reach either shoulder's "
+                    "fully extended reach sphere on the line of sight"
+                )
+            corner_intervals.append(intervals)
+
+        preferred_distance = float(np.dot(reference_center - eye, gaze))
+        feasible_distances: list[float] = []
+        for assignment in product(*corner_intervals):
+            lower = max(
+                distance_bounds[0],
+                *(interval[0] for interval in assignment),
+            )
+            upper = min(
+                distance_bounds[1],
+                *(interval[1] for interval in assignment),
+            )
+            if lower <= upper + 1e-9:
+                feasible_distances.append(
+                    min(max(preferred_distance, lower), upper)
+                )
+        if not feasible_distances:
+            raise ValueError(
+                "no screen position places every corner within reach of at "
+                "least one shoulder while satisfying equipment constraints"
+            )
+
+        distance = min(
+            feasible_distances,
+            key=lambda candidate: abs(candidate - preferred_distance),
+        )
+        position = pose_at(distance)
+        corners = screen.corners(position)
+        corner_reachable = np.zeros(len(corners), dtype=bool)
+        for shoulder, radius in reach_spheres:
+            corner_reachable |= (
+                np.linalg.norm(corners - shoulder, axis=1) <= radius + 1e-8
+            )
+        if not np.all(corner_reachable):
+            raise ValueError("the selected screen position exceeds arm reach")
+        if np.min(target._screen_constraints(position)) < -1e-6:
+            raise ValueError("the selected screen position violates equipment constraints")
 
         target.equipment.expand_screen_offset_limits(
-            horizontal_min_mm=(
-                screen_ranges["screen_horizontal_offset_mm"][0]
-                if screen.horizontal_offset_min_mm is not None
-                and screen_ranges["screen_horizontal_offset_mm"][0]
-                < screen.horizontal_offset_min_mm
-                else None
-            ),
-            vertical_min_mm=(
-                screen_ranges["screen_vertical_offset_mm"][0]
-                if screen.vertical_offset_min_mm is not None
-                and screen_ranges["screen_vertical_offset_mm"][0]
-                < screen.vertical_offset_min_mm
-                else None
-            ),
+            horizontal_min_mm=offset_expansions.get("screen_horizontal_offset_mm"),
+            vertical_min_mm=offset_expansions.get("screen_vertical_offset_mm"),
         )
-
-        user = target.user
-        state = target._user_state()
-        coordinates = user.getCoordinateSet()
-        coordinate_state = {
-            name: math.degrees(coordinates.get(name).getValue(state))
-            for name in coordinate_ranges
-        }
-        coordinate_bounds: dict[str, tuple[float, float]] = {}
-        for name, bounds in coordinate_ranges.items():
-            coordinate = coordinates.get(name)
-            allowed = (
-                math.degrees(coordinate.getRangeMin()),
-                math.degrees(coordinate.getRangeMax()),
-            )
-            if bounds[0] < allowed[0]:
-                coordinate.setRangeMin(math.radians(bounds[0]))
-            if bounds[1] > allowed[1]:
-                coordinate.setRangeMax(math.radians(bounds[1]))
-            coordinate_bounds[name] = bounds
-        neck_coordinate = coordinates.get("neck_base_flexion")
-        neck_range = coordinate_bounds.get("neck_base_flexion")
-        if neck_range is None:
-            neck_range = (
-                math.degrees(neck_coordinate.getRangeMin()),
-                math.degrees(neck_coordinate.getRangeMax()),
-            )
-        neck_scale = max(abs(neck_range[0]), abs(neck_range[1]), 1.0)
-
-        parameter_specs: list[tuple[str, float, float, float]] = []
-        screen_values = {
-            "screen_horizontal_offset_mm": screen.horizontal_offset_mm,
-            "screen_vertical_offset_mm": screen.vertical_offset_mm,
-            "screen_inclination_deg": screen.inclination_deg,
-        }
-        for name, bounds in screen_ranges.items():
-            parameter_specs.append((name, screen_values[name], bounds[0], bounds[1]))
-        for name, bounds in coordinate_bounds.items():
-            parameter_specs.append((name, coordinate_state[name], bounds[0], bounds[1]))
-        free = [
-            index
-            for index, (_, _, low, high) in enumerate(parameter_specs)
-            if high > low
-        ]
-        baseline = np.array([item[1] for item in parameter_specs], dtype=float)
-        lower = np.array([item[2] for item in parameter_specs], dtype=float)
-        upper = np.array([item[3] for item in parameter_specs], dtype=float)
-        start = np.clip(baseline, lower, upper)
-
-        def unpack(free_values: np.ndarray) -> np.ndarray:
-            values = start.copy()
-            values[free] = free_values
-            return values
-
-        def apply(values: np.ndarray) -> None:
-            for index, (name, _, _, _) in enumerate(parameter_specs):
-                if name in coordinate_bounds:
-                    coordinates.get(name).setValue(
-                        state, math.radians(float(values[index])), False
-                    )
-            user.realizePosition(state)
-
-        screen_indices = {
-            name: next(
-                index for index, item in enumerate(parameter_specs) if item[0] == name
-            )
-            for name in screen_ranges
-        }
-
-        def screen_position(values: np.ndarray) -> tuple[float, float, float]:
-            return tuple(
-                float(values[screen_indices[name]])
-                for name in (
-                    "screen_horizontal_offset_mm",
-                    "screen_vertical_offset_mm",
-                    "screen_inclination_deg",
-                )
-            )
-
-        def hard_constraint_values(free_values: np.ndarray) -> np.ndarray:
-            values = unpack(free_values)
-            apply(values)
-            _, gaze_angles = target._gaze_center_coordinates(
-                screen_position(values)
-            )
-            palm_displacements = (
-                target._palm_marker_positions() - palm_reference
-            ) / 0.01
-            return np.concatenate((gaze_angles, palm_displacements.ravel()))
-
-        def gaze_forward_distance(free_values: np.ndarray) -> float:
-            values = unpack(free_values)
-            apply(values)
-            local, _ = target._gaze_center_coordinates(screen_position(values))
-            return float(local[0] - 1e-6)
-
-        def restore_coordinates() -> None:
-            for name, value in coordinate_state.items():
-                coordinates.get(name).setValue(state, value, False)
-            user.realizePosition(state)
-
-        def objective(free_values: np.ndarray) -> float:
-            values = unpack(free_values)
-            apply(values)
-            scores = target._optimization_scores(screen_position(values))
-            violation = np.minimum(
-                target._screen_constraints(screen_position(values)), 0.0
-            )
-            neck_flexion_deg = math.degrees(
-                neck_coordinate.getValue(state)
-            )
-            neck_score = 1.0 - min(abs(neck_flexion_deg) / neck_scale, 1.0)
-            return float(
-                -np.dot(screen_weights, scores)
-                - neck_weight * neck_score
-                + 1000.0 * np.dot(violation, violation)
-            )
-
-        def screen_feasibility(free_values: np.ndarray) -> np.ndarray:
-            return target._screen_constraints(screen_position(unpack(free_values)))
-
-        hard_constraint_tolerance = 1e-4
-        if free:
-            initial_free = start[free]
-            initial_constraints = hard_constraint_values(initial_free)
-            constraint_jacobian = np.zeros((len(initial_constraints), len(free)))
-            for column, parameter_index in enumerate(free):
-                step = max(
-                    (upper[parameter_index] - lower[parameter_index]) * 1e-5,
-                    1e-4,
-                )
-                left = max(initial_free[column] - step, lower[parameter_index])
-                right = min(initial_free[column] + step, upper[parameter_index])
-                if right <= left:
-                    continue
-                left_values = initial_free.copy()
-                right_values = initial_free.copy()
-                left_values[column] = left
-                right_values[column] = right
-                constraint_jacobian[:, column] = (
-                    hard_constraint_values(right_values)
-                    - hard_constraint_values(left_values)
-                ) / (right - left)
-
-            independent_rows: list[int] = []
-            for row in range(len(initial_constraints)):
-                candidate_rows = independent_rows + [row]
-                rank = np.linalg.matrix_rank(
-                    constraint_jacobian[candidate_rows], tol=1e-8
-                )
-                if rank > len(independent_rows):
-                    independent_rows.append(row)
-            if (
-                not independent_rows
-                and np.max(np.abs(initial_constraints))
-                > hard_constraint_tolerance
-            ):
-                restore_coordinates()
-                raise ValueError(
-                    "no adjustable parameters can align the line of sight "
-                    "with the screen centre while preserving palm positions"
-                )
-
-            constraints = [
-                {"type": "ineq", "fun": screen_feasibility},
-                {"type": "ineq", "fun": gaze_forward_distance},
-            ]
-            if independent_rows:
-                constraints.append(
-                    {
-                        "type": "eq",
-                        "fun": lambda values: hard_constraint_values(values)[
-                            independent_rows
-                        ],
-                    }
-                )
-            result = minimize(
-                objective,
-                initial_free,
-                method="SLSQP",
-                bounds=list(zip(lower[free], upper[free])),
-                constraints=constraints,
-                options={"maxiter": max_iterations, "ftol": 1e-7, "eps": 1e-3},
-            )
-            if not result.success:
-                final_constraints = hard_constraint_values(result.x)
-                final_forward_distance = gaze_forward_distance(result.x)
-                restore_coordinates()
-                if (
-                    np.max(np.abs(final_constraints)) > hard_constraint_tolerance
-                    or final_forward_distance < 0.0
-                ):
-                    raise ValueError(
-                        "no feasible posture satisfies the screen-centre "
-                        "gaze and fixed-palm constraints "
-                        f"(optimizer: {result.message}; maximum normalized "
-                        f"constraint error: {np.max(np.abs(final_constraints)):g})"
-                    )
-                if np.min(screen_feasibility(result.x)) < -1e-6:
-                    raise ValueError(
-                        "no feasible screen position satisfies the handlebar constraints"
-                    )
-                raise RuntimeError(
-                    f"screen optimization did not converge: {result.message}"
-                )
-            values = unpack(result.x)
-            final_constraints = hard_constraint_values(result.x)
-            final_forward_distance = gaze_forward_distance(result.x)
-            if (
-                np.max(np.abs(final_constraints)) > hard_constraint_tolerance
-                or final_forward_distance < 0.0
-            ):
-                restore_coordinates()
-                raise ValueError(
-                    "optimization did not satisfy the screen-centre gaze "
-                    "and fixed-palm constraints"
-                )
-        else:
-            values = start
-            final_constraints = hard_constraint_values(np.empty(0))
-            final_forward_distance = gaze_forward_distance(np.empty(0))
-            if (
-                np.max(np.abs(final_constraints)) > hard_constraint_tolerance
-                or final_forward_distance < 0.0
-            ):
-                restore_coordinates()
-                raise ValueError(
-                    "the fixed parameters do not satisfy the screen-centre "
-                    "gaze and fixed-palm constraints"
-                )
-            if np.min(target._screen_constraints(screen_position(values))) < -1e-6:
-                raise ValueError(
-                    "the current screen position violates the handlebar constraints"
-                )
-
-        apply(values)
-        target.equipment.set_screen_position(
-            float(values[screen_indices["screen_horizontal_offset_mm"]]),
-            float(values[screen_indices["screen_vertical_offset_mm"]]),
-            float(values[screen_indices["screen_inclination_deg"]])
-        )
+        target.equipment.set_screen_position(*position)
         target._reachability_cache.clear()
         target._refresh_visualization()
 
         if inplace:
             return None
         return target
-
     def optimize_user_position(
         self,
         *,
@@ -1899,10 +1766,10 @@ class VisualErgonomicsFramework(Framework):
 
         The cone extends downward from the head plane through the eye midpoint;
         its central axis is positioned independently by the configured
-        line-of-sight offset. Each reach sphere is centred on a shoulder joint
-        and uses the same radius as the quantitative screen-area analysis.
+        line-of-sight offset. Each reach overlay is a 45-degree half-angle
+        spherical cap centred on a shoulder and directed toward screen centre;
+        its radius matches the quantitative hand-contact analysis.
         """
-        user_state = self._user_state()
         eye, cone_rotation = self._eye_center_and_cone_rotation()
         _, line_of_sight_rotation = self._eye_center_and_line_of_sight_rotation()
         screen_corners = self._screen_points()
@@ -1950,8 +1817,13 @@ class VisualErgonomicsFramework(Framework):
             ("r", (0.95, 0.3, 0.25)),
             ("l", (0.3, 0.8, 0.45)),
         ):
-            shoulder, radius = self._reachability_sphere(side)
-            points, faces = _sphere_mesh(radius)
+            shoulder, radius = self._screen_contact_sphere(side)
+            axis_direction = screen_corners.mean(axis=0) - shoulder
+            points, faces = _spherical_cap_mesh(
+                radius,
+                axis_direction,
+                half_angle_deg=45.0,
+            )
             mesh_path = directory / f"reach_{side}.vtp"
             _write_polydata(mesh_path, points, faces)
             shape = _MeshShape(mesh_path, color=color, opacity=0.12)

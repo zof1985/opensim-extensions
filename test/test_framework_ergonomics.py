@@ -1,6 +1,7 @@
 import inspect
 import math
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,29 @@ def manager():
     bike = Bike()
     bike.fit_user(user)
     return VisualErgonomicsFramework(user, bike, 45.0, 45.0)
+
+
+@pytest.fixture
+def screen_ready_manager(manager):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return manager.optimize_user_position()
+
+
+def _coordinate_snapshot(framework):
+    coordinates = framework.user.getCoordinateSet()
+    state = framework._user_state()
+    return {
+        coordinates.get(index).getName(): (
+            coordinates.get(index).getValue(state),
+            coordinates.get(index).getSpeedValue(state),
+            coordinates.get(index).getDefaultValue(),
+            coordinates.get(index).getDefaultSpeedValue(),
+            coordinates.get(index).getRangeMin(),
+            coordinates.get(index).getRangeMax(),
+        )
+        for index in range(coordinates.getSize())
+    }
 
 
 def test_ergonomics_framework_is_renderable_and_reports_view_state(manager):
@@ -68,9 +92,55 @@ def test_ergonomics_framework_is_renderable_and_reports_view_state(manager):
 
     view_state = manager.get_view_state()
 
+    assert set(view_state) == {
+        "incidence_angle_deg",
+        "observed_screen_percent",
+        "reachable_screen_percent",
+        "trunk_angle_from_horizontal_deg",
+        "right_shoulder_flexion_deg",
+        "left_shoulder_flexion_deg",
+        "right_elbow_flexion_deg",
+        "left_elbow_flexion_deg",
+        "neck_base_flexion_deg",
+        "head_flexion_deg",
+    }
     assert view_state["incidence_angle_deg"] >= 0.0
     assert 0.0 <= view_state["observed_screen_percent"] <= 100.0
     assert 0.0 <= view_state["reachable_screen_percent"] <= 100.0
+    assert view_state["right_shoulder_flexion_deg"] == pytest.approx(
+        manager.user.right_shoulder_flexion
+    )
+    assert view_state["left_shoulder_flexion_deg"] == pytest.approx(
+        manager.user.left_shoulder_flexion
+    )
+    assert view_state["right_elbow_flexion_deg"] == pytest.approx(
+        manager.user.right_elbow_flexion
+    )
+    assert view_state["left_elbow_flexion_deg"] == pytest.approx(
+        manager.user.left_elbow_flexion
+    )
+    assert view_state["neck_base_flexion_deg"] == pytest.approx(
+        manager.user.neck_base_flexion
+    )
+    assert view_state["head_flexion_deg"] == pytest.approx(manager.user.neck_flexion)
+    centers = manager.user.joint_centers
+    hips = (
+        np.asarray(centers["right_hip"]) + np.asarray(centers["left_hip"])
+    ) / 2
+    shoulders = (
+        np.asarray(centers["right_shoulder"])
+        + np.asarray(centers["left_shoulder"])
+    ) / 2
+    trunk_axis = shoulders - hips
+    expected_trunk_angle = math.degrees(
+        math.atan2(
+            float(trunk_axis[1]),
+            math.hypot(float(trunk_axis[0]), float(trunk_axis[2])),
+        )
+    )
+    assert view_state["trunk_angle_from_horizontal_deg"] == pytest.approx(
+        expected_trunk_angle
+    )
 
 
 def test_visual_cone_defaults_use_documented_ergonomic_values(manager):
@@ -129,6 +199,40 @@ def test_visual_cone_starts_at_head_plane_independent_of_line_of_sight(manager):
     assert line_of_sight_rotation[:, 0] != pytest.approx(cone_rotation[:, 0])
 
 
+def test_spherical_cap_mesh_uses_requested_axis_and_half_angle():
+    from importlib import import_module
+
+    ergonomics = import_module("opensim_extensions.framework.ergonomics")
+    axis = np.array([1.0, 2.0, -3.0])
+    original_axis = axis.copy()
+    radius = 0.7
+    points, faces = ergonomics._spherical_cap_mesh(
+        radius, axis, half_angle_deg=45.0
+    )
+    unit_axis = axis / np.linalg.norm(axis)
+
+    assert axis == pytest.approx(original_axis)
+    assert np.linalg.norm(points, axis=1) == pytest.approx(
+        np.full(len(points), radius)
+    )
+    assert np.all(
+        points @ unit_axis / radius >= math.cos(math.radians(45.0)) - 1e-12
+    )
+    assert all(0 <= index < len(points) for face in faces for index in face)
+
+
+def test_screen_contact_sphere_reaches_hand_distal_endpoint(manager):
+    hand_length = manager.user.anthropometry.values["handlength"] * 1e-3
+    for side, side_name in (("r", "right"), ("l", "left")):
+        _, palm_center_radius = manager._reachability_sphere(side)
+        _, contact_radius = manager._screen_contact_sphere(side)
+        palm_length = getattr(manager.user, f"{side_name}_palm_length")
+
+        assert contact_radius - palm_center_radius == pytest.approx(
+            hand_length - palm_length / 2
+        )
+
+
 def test_reachability_objective_guides_screen_toward_distant_hull(manager, monkeypatch):
     position = (
         manager.equipment.screen_horizontal_offset_mm,
@@ -175,112 +279,125 @@ def test_reachability_hull_cache_tracks_small_trunk_changes(manager):
     assert not np.array_equal(original_hull, changed_hull)
 
 
-def test_optimization_returns_independent_framework_and_respects_screen_bounds(manager):
-    original_user = manager.user
-    original_bike = manager.equipment
-    original_neck = original_user.neck_flexion
-    original_screen = original_bike.screen_inclination_deg
-
-    optimized = manager.optimize_screen_position(
-        incidence_weight=0.33,
-        observed_screen_weight=0.33,
-        reachability_weight=0.34,
-        inplace=False,
-        neck_flexionextension_range_deg=(-10.0, 10.0),
-        head_extensionflexion_range_deg=(0.0, 0.0),
-        screen_incline_range_deg=(40.0, 80.0),
-        max_iterations=60,
+def test_optimization_returns_independent_framework_and_respects_screen_bounds(
+    screen_ready_manager,
+):
+    original_user = screen_ready_manager.user
+    original_equipment = screen_ready_manager.equipment
+    user_before = _coordinate_snapshot(screen_ready_manager)
+    screen_before = (
+        original_equipment.screen_horizontal_offset_mm,
+        original_equipment.screen_vertical_offset_mm,
+        original_equipment.screen_inclination_deg,
+    )
+    optimized = screen_ready_manager.optimize_screen_position(
+        screen_incline_range_deg=(40.0, 80.0)
     )
 
     assert isinstance(optimized, VisualErgonomicsFramework)
     assert isinstance(optimized.user, User)
     assert optimized.user is not original_user
-    assert optimized.equipment is not original_bike
+    assert optimized.equipment is not original_equipment
     assert optimized.line_of_sight_offset_deg == pytest.approx(
-        manager.line_of_sight_offset_deg
+        screen_ready_manager.line_of_sight_offset_deg
     )
-    assert original_user.neck_flexion == pytest.approx(original_neck)
-    assert original_bike.screen_inclination_deg == pytest.approx(original_screen)
-    optimized.user.set_neck_flexion(-5.0)
-    assert optimized.user.neck_flexion == pytest.approx(-5.0)
-    assert original_user.neck_flexion == pytest.approx(original_neck)
+    assert _coordinate_snapshot(screen_ready_manager) == user_before
     assert 40.0 <= optimized.equipment.screen_inclination_deg <= 80.0
-    assert min(optimized._screen_constraints(
+    assert min(
+        optimized._screen_constraints(
+            (
+                optimized.equipment.screen_horizontal_offset_mm,
+                optimized.equipment.screen_vertical_offset_mm,
+                optimized.equipment.screen_inclination_deg,
+            )
+        )
+    ) >= -1e-6
+    eye, gaze_rotation = optimized._eye_center_and_line_of_sight_rotation()
+    gaze = gaze_rotation[:, 0]
+    screen_corners = optimized.equipment.screen.corners(
         (
             optimized.equipment.screen_horizontal_offset_mm,
             optimized.equipment.screen_vertical_offset_mm,
             optimized.equipment.screen_inclination_deg,
         )
-    )) >= -1e-6
+    )
+    screen_center = screen_corners.mean(axis=0)
+    assert screen_center - eye == pytest.approx(
+        np.dot(screen_center - eye, gaze) * gaze, abs=1e-8
+    )
+    assert optimized.get_view_state()["incidence_angle_deg"] == pytest.approx(
+        0.0, abs=1e-5
+    )
+    reach_spheres = [
+        optimized._reachability_sphere(side) for side in ("r", "l")
+    ]
+    for corner in screen_corners:
+        assert min(
+            np.linalg.norm(corner - shoulder) - radius
+            for shoulder, radius in reach_spheres
+        ) <= 1e-8
+    assert (
+        optimized.equipment.screen_horizontal_offset_mm,
+        optimized.equipment.screen_vertical_offset_mm,
+        optimized.equipment.screen_inclination_deg,
+    ) != pytest.approx(screen_before)
     assert set(optimized.get_view_state()) == {
         "incidence_angle_deg",
         "observed_screen_percent",
         "reachable_screen_percent",
+        "trunk_angle_from_horizontal_deg",
+        "right_shoulder_flexion_deg",
+        "left_shoulder_flexion_deg",
+        "right_elbow_flexion_deg",
+        "left_elbow_flexion_deg",
+        "neck_base_flexion_deg",
+        "head_flexion_deg",
     }
 
 
-def test_inplace_optimization_modifies_manager_and_returns_none(manager):
-    original_screen = manager.equipment.screen_inclination_deg
-    neck = manager.user.getCoordinateSet().get("neck_base_flexion")
-
-    result = manager.optimize_screen_position(
-        incidence_weight=1.0,
-        observed_screen_weight=0.0,
-        reachability_weight=0.0,
-        inplace=True,
-        neck_flexionextension_range_deg=(5.0, 5.0),
-        head_extensionflexion_range_deg=(0.0, 0.0),
-        screen_incline_range_deg=(original_screen, original_screen),
-        screen_horizontal_offset_range_mm=(
-            manager.equipment.screen_horizontal_offset_mm,
-            manager.equipment.screen_horizontal_offset_mm,
-        ),
-        screen_vertical_offset_range_mm=(
-            manager.equipment.screen_vertical_offset_mm,
-            manager.equipment.screen_vertical_offset_mm,
-        ),
-    )
+def test_inplace_optimization_changes_only_the_screen(screen_ready_manager):
+    user_before = _coordinate_snapshot(screen_ready_manager)
+    result = screen_ready_manager.optimize_screen_position(inplace=True)
 
     assert result is None
-    assert manager.equipment.screen_inclination_deg == pytest.approx(original_screen)
-    assert neck.getValue(manager._user_state()) == pytest.approx(np.deg2rad(5.0))
+    assert _coordinate_snapshot(screen_ready_manager) == user_before
+    assert screen_ready_manager.get_view_state()["incidence_angle_deg"] == pytest.approx(
+        0.0, abs=1e-5
+    )
 
 
-def test_screen_pose_parameters_accept_fixed_values(manager):
-    original = manager.equipment.screen
-    horizontal = original.horizontal_offset_mm + 1.0
+def test_screen_pose_parameters_accept_fixed_values(screen_ready_manager):
+    screen_ready_manager.optimize_screen_position(inplace=True)
+    original = screen_ready_manager.equipment.screen
+    horizontal = original.horizontal_offset_mm
     vertical = original.vertical_offset_mm
     inclination = original.inclination_deg
 
-    optimized = manager.optimize_screen_position(
+    optimized = screen_ready_manager.optimize_screen_position(
         screen_horizontal_offset_mm=horizontal,
         screen_vertical_offset_mm=vertical,
         screen_inclination_deg=inclination,
-        neck_flexionextension_range_deg=None,
-        head_extensionflexion_range_deg=None,
     )
 
     assert optimized.equipment.screen_horizontal_offset_mm == pytest.approx(horizontal)
     assert optimized.equipment.screen_vertical_offset_mm == pytest.approx(vertical)
     assert optimized.equipment.screen_inclination_deg == pytest.approx(inclination)
-    assert manager.equipment.screen_horizontal_offset_mm == pytest.approx(
+    assert screen_ready_manager.equipment.screen_horizontal_offset_mm == pytest.approx(
         original.horizontal_offset_mm
     )
 
 
-def test_screen_offset_range_expands_equipment_limit(manager):
-    screen = manager.equipment.screen
+def test_screen_offset_range_expands_equipment_limit(screen_ready_manager):
+    screen_ready_manager.optimize_screen_position(inplace=True)
+    screen = screen_ready_manager.equipment.screen
     horizontal_limit = screen.horizontal_offset_min_mm - 0.1
 
     with pytest.warns(UserWarning, match="expanding the limits"):
-        optimized = manager.optimize_screen_position(
+        optimized = screen_ready_manager.optimize_screen_position(
             screen_horizontal_offset_mm=(
                 horizontal_limit,
                 screen.horizontal_offset_mm,
             ),
-            neck_flexionextension_range_deg=None,
-            head_extensionflexion_range_deg=None,
-            max_iterations=60,
         )
 
     assert optimized.equipment.screen.horizontal_offset_min_mm == pytest.approx(
@@ -401,13 +518,15 @@ def test_optimize_user_position_aligns_gaze_without_neck_optimization(
     assert gaze_angles == pytest.approx((0.0, 0.0), abs=1e-4)
 
 
-def test_optimization_requires_valid_weights(manager):
-    with pytest.raises(ValueError, match="sum to 1"):
-        manager.optimize_screen_position(
-            incidence_weight=0.4,
-            observed_screen_weight=0.4,
-            reachability_weight=0.4,
-        )
+def test_screen_optimization_rejects_incompatible_inclination_and_preserves_user(
+    screen_ready_manager,
+):
+    user_before = _coordinate_snapshot(screen_ready_manager)
+
+    with pytest.raises(ValueError, match="required screen inclination"):
+        screen_ready_manager.optimize_screen_position(screen_inclination_deg=0.0)
+
+    assert _coordinate_snapshot(screen_ready_manager) == user_before
 
 
 def test_reachability_hull_uses_fully_extended_palm_markers_independent_of_grip(

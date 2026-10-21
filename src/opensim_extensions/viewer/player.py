@@ -477,7 +477,6 @@ def start_player(
     def run() -> None:
         import tkinter as tk
         from tkinter import filedialog, messagebox
-        from tkinter import font as tkfont
         from tkinter import ttk
 
         import sv_ttk
