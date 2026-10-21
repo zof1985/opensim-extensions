@@ -231,8 +231,10 @@ Ogni mano è un corpo articolato rispetto al radio da un giunto che consente
 flessione-estensione e deviazione radiale-ulnare del polso. I marker `RPALM` e
 `LPALM`, vincolati ai rispettivi corpi della mano, identificano il centro del
 palmo e vengono aggiornati in base alla lunghezza antropometrica del palmo. Il
-cono si apre in avanti; il suo angolo verticale è misurato verso il basso. Gli
-overlay sono inclusi nel framework e appaiono quando viene mostrato nel viewer.
+cono si apre in avanti; il suo margine superiore è parallelo al piano della
+testa passante per gli occhi e la sua altezza angolare si estende verso il
+basso. La linea di visione è orientata separatamente. Gli overlay sono inclusi
+nel framework e appaiono quando viene mostrato nel viewer.
 
 ```python
 from opensim_extensions import Bike, User
@@ -259,10 +261,6 @@ optimized = ergonomics.optimize_screen_position(
 view_state = optimized.get_view_state()
 
 optimized_user = ergonomics.optimize_user_position(
-    incidence_weight=0.3,
-    observed_screen_weight=0.2,
-    reachability_weight=0.3,
-    neck_flexion_weight=0.2,
     neck_base_flexion_deg=(-30.0, 30.0),
     lumbar_extension_deg=0.0,
     right_shoulder_flexion_deg=(20.0, 90.0),
@@ -271,31 +269,49 @@ optimized_user = ergonomics.optimize_user_position(
 
 `line_of_sight_offset_deg` configura l'angolo della linea di visione rispetto
 al piano della testa passante per gli occhi; il default `-15°` indica una
-direzione verso il basso. In `optimize_user_position`, i quattro pesi devono
-essere compresi tra 0 e 1 e sommare a 1; il peso `neck_flexion_weight`
-penalizza la deviazione della flesso-estensione del collo dalla posizione
-neutra.
+direzione verso il basso. È indipendente dall'ampiezza del cono: il margine
+superiore del cono coincide sempre con il piano della testa, mentre
+`cone_height_angle_deg` ne stabilisce l'estensione verso il basso. In
+`optimize_screen_position` accetta pesi per incidenza, visibilità e
+raggiungibilità. `optimize_user_position` non usa pesi: esegue fasi
+sequenziali per massimizzare la raggiungibilità, ripristinare i palmi e
+allineare la linea di visione al centro dello schermo.
 
 Per i parametri di posa dello schermo e per le coordinate di `User`, `None`
 mantiene il valore corrente, un numero fissa il valore e una tupla di due
 numeri definisce il range ottimizzabile. `optimize_user_position` espone
 esplicitamente le articolazioni di collo, braccia, gomiti, avambracci e polsi,
 oltre alla flesso-estensione lombare; mantiene fisso lo schermo e, per
-default, ottimizza solo la flesso-estensione del collo (`neck_base_flexion`,
-da -30° a 30°). Se un valore o un range supera i limiti attuali di un
-parametro, i limiti vengono ampliati e viene emesso un warning; i vincoli
-geometrici di fattibilità dello schermo restano attivi.
+default, ottimizza la flesso-estensione della base del collo e la flessione
+del cranio da -45° a 45°, e la rotazione del cranio da -30° a 30°. Se un
+valore o un range supera i limiti attuali di un parametro, i limiti vengono
+ampliati e viene emesso un warning; i vincoli geometrici di fattibilità dello
+schermo restano attivi.
+Durante `optimize_user_position`, il busto si flette fino a quando l'intero
+schermo rientra in almeno una sfera di raggiungibilità o fino al limite
+consentito. La sfera è centrata sul giunto della spalla e il raggio è la
+massima distanza spalla-palmo campionata con il gomito completamente esteso.
+Successivamente i palmi vengono riportati alle posizioni iniziali mediante
+flessione di spalle, gomiti, avambracci e polsi; infine il collo viene regolato
+per allineare la linea di visione al centro dello schermo mediante una soluzione
+geometrica delle coordinate, senza ottimizzare una loss. L'ottimizzatore viene
+usato solo per ripristinare i palmi; l'allineamento del collo seleziona le due
+coordinate libere con effetti più indipendenti sullo sguardo e lascia invariate
+le altre. Le metriche vengono calcolate sulla posa finale; la percentuale di
+raggiungibilità è la frazione della griglia dello schermo contenuta in almeno
+una delle due sfere.
 
-Le superfici di raggiungibilità usano un range di flessione della spalla
-0–180° e di adduzione/abduzione −30–30°; avambraccio e polso mantengono i
-range definiti dal modello.
+Il raggio di raggiungibilità spalla-palmo viene stimato con il gomito esteso,
+campionando un range di flessione della spalla 0–180° e di
+adduzione/abduzione −30–30°; avambraccio e polso mantengono i range definiti
+dal modello.
 
 Per impostazione predefinita, la linea di visione è inclinata di 15° verso il
-basso rispetto al piano della testa passante per gli occhi. Il cono, centrato
-sulla linea di visione, ha un'ampiezza verticale totale di 30° e copre quindi
-approssimativamente da 0° a 30° sotto il piano degli occhi. In orizzontale
-copre 30° totali (15° per lato). Gli studi di Turville et al. (1998) e
-Burgess-Limerick et al. (2000)
+basso rispetto al piano della testa passante per gli occhi. Il cono ha
+un'ampiezza verticale totale di 30° e copre quindi da 0° a 30° sotto il piano
+degli occhi, indipendentemente dall'offset della linea di visione. In
+orizzontale copre 30° totali (15° per lato). Gli studi di Turville et al.
+(1998) e Burgess-Limerick et al. (2000)
 supportano il posizionamento del display al di sotto del livello degli occhi e
 segnalano i compromessi posturali a inclinazioni maggiori. Le fonti non
 definiscono un limite numerico orizzontale equivalente: i 30° totali sono
@@ -310,23 +326,23 @@ DOI: 10.1518/001872000779656598
 ([PubMed/NLM](https://pubmed.ncbi.nlm.nih.gov/10917150/)); Canadian Centre
 for Occupational Health and Safety, [Monitor Positioning](https://www.ccohs.ca/oshanswers/ergonomics/office/monitor_positioning.html).
 
-I tre pesi devono essere compresi tra 0 e 1 e sommare a 1. `inplace=False`
+Per `optimize_screen_position`, i tre pesi devono essere compresi tra 0 e 1 e
+sommare a 1. `inplace=False`
 restituisce un nuovo framework con copie dei modelli; `inplace=True` modifica
 il framework corrente e restituisce `None`. `get_view_state()` restituisce
 l'angolo di incidenza (0° è perpendicolare allo schermo) e le percentuali di
 schermo visibile nel cono e raggiungibile. Le percentuali sono stimate su una
-griglia regolare. Per stimare la raggiungibilità si campionano le posizioni dei
-marker al centro dei palmi, variando la cinematica di spalla, avambraccio e
-polso e mantenendo i gomiti completamente estesi. Gli inviluppi convessi
-risultanti definiscono le superfici mostrate nel viewer e la parte dello
-schermo raggiungibile. I limiti effettivi delle coordinate OpenSim sono
+griglia regolare. Per stimare la raggiungibilità si campiona la distanza dei
+punti dello schermo dai centri delle spalle, confrontandola con il raggio
+spalla-palmo a gomito completamente esteso. Le sfere risultanti sono mostrate
+nel viewer. I limiti effettivi delle coordinate OpenSim sono
 inclusi combinando sistematicamente i valori estremi dei range con campioni
 casuali interni. Le coordinate articolari aggiuntive si impostano, per
 esempio, con
 `coordinate_ranges_deg={"arm_flex_r": (60.0, 90.0), "elbow_flex_r": (10.0, 35.0)}`.
-Questi limiti modificano la postura ottimizzata per l'impugnatura ma non
-l'inviluppo di raggiungibilità, calcolato indipendentemente con le braccia
-distese; busto e bacino restano invece nella postura corrente.
+Questi limiti modificano la postura ottimizzata per l'impugnatura; il raggio
+di raggiungibilità è invece calcolato con le braccia distese, mentre busto e
+bacino restano nella postura corrente.
 Gli offset dello schermo si limitano con `screen_horizontal_offset_range_mm` e
 `screen_vertical_offset_range_mm`. Il vincolo è verificato sull'intera
 superficie: lo schermo non può avvicinarsi al rider oltre il centro del

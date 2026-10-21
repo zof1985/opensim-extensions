@@ -103,6 +103,78 @@ def test_line_of_sight_is_tilted_down_from_head_plane(manager):
     assert visual_rotation[:, 0] == pytest.approx(expected_forward)
 
 
+def test_visual_cone_starts_at_head_plane_independent_of_line_of_sight(manager):
+    framework = VisualErgonomicsFramework(
+        manager.user,
+        manager.equipment,
+        cone_height_angle_deg=45.0,
+        line_of_sight_offset_deg=-15.0,
+    )
+    _, head_rotation = framework._eye_center_and_head_rotation()
+    _, cone_rotation = framework._eye_center_and_cone_rotation()
+    _, line_of_sight_rotation = framework._eye_center_and_line_of_sight_rotation()
+    half_height = math.radians(framework.cone_height_angle_deg / 2)
+    offset = math.radians(framework.line_of_sight_offset_deg)
+    upper_edge_direction = (
+        math.cos(half_height) * cone_rotation[:, 0]
+        + math.sin(half_height) * cone_rotation[:, 1]
+    )
+    expected_line_of_sight = (
+        math.cos(offset) * head_rotation[:, 0]
+        + math.sin(offset) * head_rotation[:, 1]
+    )
+
+    assert upper_edge_direction == pytest.approx(head_rotation[:, 0])
+    assert line_of_sight_rotation[:, 0] == pytest.approx(expected_line_of_sight)
+    assert line_of_sight_rotation[:, 0] != pytest.approx(cone_rotation[:, 0])
+
+
+def test_reachability_objective_guides_screen_toward_distant_hull(manager, monkeypatch):
+    position = (
+        manager.equipment.screen_horizontal_offset_mm,
+        manager.equipment.screen_vertical_offset_mm,
+        manager.equipment.screen_inclination_deg,
+    )
+    screen = manager._screen_samples(position)
+
+    def sphere_with_gap(gap):
+        center = screen.mean(axis=0)
+        center[0] -= 0.5
+        radius = float(np.min(np.linalg.norm(screen - center, axis=1)) - gap)
+        return center, radius
+
+    gap = [0.05]
+    monkeypatch.setattr(
+        VisualErgonomicsFramework,
+        "_reachability_sphere",
+        lambda self, side: sphere_with_gap(gap[0]),
+    )
+    near_score = manager._optimization_scores(position)[2]
+    gap[0] = 0.2
+    far_score = manager._optimization_scores(position)[2]
+
+    assert near_score > 0.1
+    assert near_score > far_score
+
+
+def test_reachability_hull_cache_tracks_small_trunk_changes(manager):
+    state = manager._user_state()
+    lumbar = manager.user.getCoordinateSet().get("lumbar_extension")
+    original_value = lumbar.getValue(state)
+    original_hull = manager._reachability_hull("r")[0].copy()
+    changed_hull = None
+    try:
+        lumbar.setValue(state, original_value + math.radians(0.001), False)
+        manager.user.realizePosition(state)
+        changed_hull = manager._reachability_hull("r")[0].copy()
+    finally:
+        lumbar.setValue(state, original_value, False)
+        manager.user.realizePosition(state)
+
+    assert changed_hull is not None
+    assert not np.array_equal(original_hull, changed_hull)
+
+
 def test_optimization_returns_independent_framework_and_respects_screen_bounds(manager):
     original_user = manager.user
     original_bike = manager.equipment
@@ -219,13 +291,20 @@ def test_screen_offset_range_expands_equipment_limit(manager):
 
 def test_optimize_user_position_fixes_float_and_expands_coordinate_limits(manager):
     original_screen = manager.equipment.screen
-    target_degrees = -50.0
-    arm_flexion_degrees = 25.0
-    trunk_flexion_degrees = 10.0
+    target_degrees = -41.0
+    state = manager._user_state()
+    arm_flexion_degrees = math.degrees(
+        manager.user.getCoordinateSet().get("arm_flex_r").getValue(state)
+    )
+    trunk_flexion_degrees = math.degrees(
+        manager.user.getCoordinateSet().get("lumbar_extension").getValue(state)
+    )
 
     with pytest.warns(UserWarning, match="expanding the limits"):
         optimized = manager.optimize_user_position(
             neck_base_flexion_deg=target_degrees,
+            neck_rotation_deg=(-30.0, 30.0),
+            neck_flexion_deg=(-45.0, 45.0),
             right_shoulder_flexion_deg=arm_flexion_degrees,
             lumbar_extension_deg=trunk_flexion_degrees,
         )
@@ -276,18 +355,11 @@ def test_optimize_user_position_defaults_to_neck_range(manager):
     original_state = manager._user_state()
     neck_coordinate = coordinates.get("neck_base_flexion")
     original_neck = neck_coordinate.getValue(original_state)
-    original_other_coordinate = coordinates.get("neck_rotation").getValue(
-        original_state
-    )
 
     neck_coordinate.setValue(original_state, np.deg2rad(20.0), False)
     manager.user.realizePosition(original_state)
     try:
         optimized = manager.optimize_user_position(
-            incidence_weight=0.0,
-            observed_screen_weight=0.0,
-            reachability_weight=0.0,
-            neck_flexion_weight=1.0,
             max_iterations=60,
         )
     finally:
@@ -295,11 +367,38 @@ def test_optimize_user_position_defaults_to_neck_range(manager):
         manager.user.realizePosition(original_state)
 
     neck = optimized.user.getCoordinateSet().get("neck_base_flexion")
-    neck_value_deg = math.degrees(neck.getValue(optimized._user_state()))
-    assert neck_value_deg == pytest.approx(0.0, abs=0.1)
-    assert optimized.user.getCoordinateSet().get("neck_rotation").getValue(
-        optimized._user_state()
-    ) == pytest.approx(original_other_coordinate)
+    _, gaze_angles = optimized._gaze_center_coordinates(
+        (
+            optimized.equipment.screen_horizontal_offset_mm,
+            optimized.equipment.screen_vertical_offset_mm,
+            optimized.equipment.screen_inclination_deg,
+        )
+    )
+    assert gaze_angles == pytest.approx((0.0, 0.0), abs=1e-4)
+
+
+def test_optimize_user_position_aligns_gaze_without_neck_optimization(
+    manager, monkeypatch
+):
+    from importlib import import_module
+
+    ergonomics_module = import_module("opensim_extensions.framework.ergonomics")
+
+    def reject_optimization(*args, **kwargs):
+        pytest.fail("neck alignment must not use the objective optimizer")
+
+    monkeypatch.setattr(ergonomics_module, "minimize", reject_optimization)
+
+    optimized = manager.optimize_user_position()
+    _, gaze_angles = optimized._gaze_center_coordinates(
+        (
+            optimized.equipment.screen_horizontal_offset_mm,
+            optimized.equipment.screen_vertical_offset_mm,
+            optimized.equipment.screen_inclination_deg,
+        )
+    )
+
+    assert gaze_angles == pytest.approx((0.0, 0.0), abs=1e-4)
 
 
 def test_optimization_requires_valid_weights(manager):
@@ -308,13 +407,6 @@ def test_optimization_requires_valid_weights(manager):
             incidence_weight=0.4,
             observed_screen_weight=0.4,
             reachability_weight=0.4,
-        )
-    with pytest.raises(ValueError, match="sum to 1"):
-        manager.optimize_user_position(
-            incidence_weight=0.3,
-            observed_screen_weight=0.2,
-            reachability_weight=0.3,
-            neck_flexion_weight=0.3,
         )
 
 
