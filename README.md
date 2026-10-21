@@ -217,6 +217,81 @@ riferimento, ma consente all'IK di adattarla per raggiungere le corna del
 manubrio. In questa modalità, la posizione verticale del manubrio viene scelta
 per avvicinarsi all'altezza della sella.
 
+### Ergonomia visiva
+
+`VisualErgonomicsFramework`, esportata anche da `opensim_extensions`, estende
+`Framework` con un cono visivo a base rettangolare ancorato al punto medio
+degli occhi e con le superfici dello spazio di raggiungimento delle mani.
+Ogni mano è un corpo articolato rispetto al radio da un giunto che consente
+flessione-estensione e deviazione radiale-ulnare del polso. I marker `RPALM` e
+`LPALM`, vincolati ai rispettivi corpi della mano, identificano il centro del
+palmo e vengono aggiornati in base alla lunghezza antropometrica del palmo. Il
+cono si apre in avanti; il suo angolo verticale è misurato verso il basso. Gli
+overlay sono inclusi nel framework e appaiono quando viene mostrato nel viewer.
+
+```python
+from opensim_extensions import Bike, User, VisualErgonomicsFramework
+
+user = User("M", height_cm=178.0, mass_kg=75.0)
+bike = Bike()
+bike.fit_user(user)
+ergonomics = VisualErgonomicsFramework(
+    user,
+    bike,
+)
+
+optimized = ergonomics.optimize_screen_position(
+    incidence_weight=0.33,
+    observed_screen_weight=0.33,
+    reachability_weight=0.34,
+    inplace=False,
+    neck_flexionextension_range_deg=(-30.0, 30.0),
+    head_extensionflexion_range_deg=(0.0, 0.0),
+    screen_incline_range_deg=(10.0, 90.0),
+)
+view_state = optimized.get_view_state()
+```
+
+Per impostazione predefinita, il cono copre 30° in orizzontale (15° per lato)
+e 30° verso il basso in verticale. Il limite verticale rappresenta la zona
+visiva preferita indicata dal CCOHS, centrata circa 15° sotto l'orizzontale;
+gli studi di Turville et al. (1998) e Burgess-Limerick et al. (2000)
+supportano il posizionamento del display al di sotto del livello degli occhi e
+segnalano i compromessi posturali a inclinazioni maggiori. Le fonti non
+definiscono un limite numerico orizzontale equivalente: i 30° totali sono
+un'approssimazione simmetrica conservativa del modello, non una soglia
+ergonomica universale.
+
+Riferimenti: Turville et al., *Applied Ergonomics*, 29(4), 239-246 (1998),
+DOI: 10.1016/S0003-6870(97)00048-3
+([PubMed/NLM](https://pubmed.ncbi.nlm.nih.gov/9701537/)); Burgess-Limerick
+et al., *Human Factors*, 42(1), 140-150 (2000),
+DOI: 10.1518/001872000779656598
+([PubMed/NLM](https://pubmed.ncbi.nlm.nih.gov/10917150/)); Canadian Centre
+for Occupational Health and Safety, [Monitor Positioning](https://www.ccohs.ca/oshanswers/ergonomics/office/monitor_positioning.html).
+
+I tre pesi devono essere compresi tra 0 e 1 e sommare a 1. `inplace=False`
+restituisce un nuovo framework con copie dei modelli; `inplace=True` modifica
+il framework corrente e restituisce `None`. `get_view_state()` restituisce
+l'angolo di incidenza (0° è perpendicolare allo schermo) e le percentuali di
+schermo visibile nel cono e raggiungibile. Le percentuali sono stimate su una
+griglia regolare. Per stimare la raggiungibilità si campionano le posizioni dei
+marker al centro dei palmi, variando la cinematica di spalla, avambraccio e
+polso e mantenendo i gomiti completamente estesi. Gli inviluppi convessi
+risultanti definiscono le superfici mostrate nel viewer e la parte dello
+schermo raggiungibile. I limiti effettivi delle coordinate OpenSim sono
+inclusi combinando sistematicamente i valori estremi dei range con campioni
+casuali interni. Le coordinate articolari aggiuntive si impostano, per
+esempio, con
+`coordinate_ranges_deg={"arm_flex_r": (60.0, 90.0), "elbow_flex_r": (10.0, 35.0)}`.
+Questi limiti modificano la postura ottimizzata per l'impugnatura ma non
+l'inviluppo di raggiungibilità, calcolato indipendentemente con le braccia
+distese; busto e bacino restano invece nella postura corrente.
+Gli offset dello schermo si limitano con `screen_horizontal_offset_range_mm` e
+`screen_vertical_offset_range_mm`. Il vincolo è verificato sull'intera
+superficie: lo schermo non può avvicinarsi al rider oltre il centro del
+manubrio né scendere sotto la sua altezza.
+
 Altri parametri e proprietà:
 
 - `crank_spacing_mm` è la distanza tra i piani centrali delle pedivelle.
@@ -305,7 +380,9 @@ viewer.save_animation(framework, "output/motion.mp4", motion="motion.sto")
 controllo della riproduzione. Sono supportati i modelli OpenSim e gli oggetti
 `Framework`; un framework viene visualizzato come snapshot composito. Le
 tabelle di movimento possono essere passate come percorso `.mot`/`.sto` o
-come `opensim.TimeSeriesTable`.
+come `opensim.TimeSeriesTable`. Nel gruppo View, i controlli `Vision cone +
+axis` e `Reachability` mostrano o nascondono i rispettivi overlay; risultano
+disabilitati quando il modello non contiene quegli elementi.
 
 `save_snapshot()` esporta un'immagine **SVG** o **PNG** senza aprire una
 finestra, in base all'estensione del percorso. Per i PNG, `dpi` imposta i DPI

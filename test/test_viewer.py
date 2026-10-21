@@ -5,6 +5,8 @@ import pytest
 opensim = pytest.importorskip("opensim")
 
 from opensim_extensions.viewer import VTKViewer, viewer as viewer_module
+from opensim_extensions.viewer.visualizer import VTKVisualizer
+from opensim_extensions.viewer.viewer import _ViewerModel
 from opensim_extensions.framework import Framework
 
 
@@ -70,6 +72,17 @@ def test_viewer_accepts_framework_and_displays_merged_snapshot(monkeypatch):
 def test_viewer_rejects_values_outside_the_supported_input_types():
     with pytest.raises(TypeError, match="opensim.Model or Framework"):
         VTKViewer().show(object())
+
+
+def test_overlay_controls_report_unavailable_layers_for_plain_models():
+    visualizer = VTKVisualizer(_ViewerModel(make_model()), offscreen=True)
+    try:
+        assert not visualizer.has_vision_cone_and_axis
+        assert not visualizer.has_reachability_regions
+        visualizer.set_vision_cone_visible(False)
+        visualizer.set_reachability_visible(False)
+    finally:
+        visualizer.close()
 
 
 def make_pin_model() -> opensim.Model:

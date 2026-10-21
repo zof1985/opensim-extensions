@@ -22,7 +22,16 @@ def _ensure_visualizer_dll_path() -> None:
 
 
 def register_geometry_search_path(opensim: Any, directory: str | Path) -> None:
-    """Add a directory to OpenSim's native mesh-geometry search paths."""
+    """Register a directory with OpenSim's native mesh search paths.
+
+    Parameters
+    ----------
+    opensim : module
+        Imported OpenSim Python bindings exposing ``ModelVisualizer``.
+    directory : str or pathlib.Path
+        Directory containing geometry files. User-home markers are expanded
+        and the path is resolved before registration.
+    """
     opensim.ModelVisualizer.addDirToGeometrySearchPaths(
         str(Path(directory).expanduser().resolve())
     )
@@ -31,7 +40,26 @@ def register_geometry_search_path(opensim: Any, directory: str | Path) -> None:
 def resolve_geometry_file(
     opensim: Any, model: Any, filename: str, directories: Any = ()
 ) -> Path | None:
-    """Locate a mesh file in ``directories`` or OpenSim's geometry search paths."""
+    """Resolve a mesh file against local and OpenSim geometry search paths.
+
+    Parameters
+    ----------
+    opensim : module
+        Imported OpenSim Python bindings.
+    model : opensim.Model
+        Model used by OpenSim's native geometry resolver.
+    filename : str
+        Mesh filename or path stored in a model geometry component.
+    directories : iterable of str or pathlib.Path, optional
+        Directories searched in order before consulting OpenSim's registered
+        geometry paths.
+
+    Returns
+    -------
+    pathlib.Path or None
+        First matching local path, or the native resolved path. Returns
+        ``None`` if the file cannot be resolved.
+    """
     for directory in directories:
         candidate = Path(directory) / filename
         if candidate.is_file():

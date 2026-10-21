@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import math
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from ...bodies import (
+from .....bodies import (
     Box,
     Cylinder,
     Ellipsoid,
@@ -13,7 +14,8 @@ from ...bodies import (
     add_welded_body,
     cylinder_between,
 )
-from ...opensim import import_opensim
+from ...equipment import Equipment, Screen
+from .....opensim import import_opensim
 
 __all__ = ["Bike", "IRON_DENSITY_KG_M3"]
 
@@ -116,8 +118,23 @@ def _density_property(component: str):
     def setter(self, value: float) -> None:
         self.set_density(component, value)
 
+    setter.__doc__ = f"""Set the material density of the {component} group.
+
+    Parameters
+    ----------
+    value : float
+        Positive finite density in kilograms per cubic metre.
+    """
     return property(
-        getter, setter, doc=f"Density of the {component} material (kg/m^3)."
+        getter,
+        setter,
+        doc=(
+            f"Density of the {component} material (kg/m^3).\n\n"
+            "Returns\n"
+            "-------\n"
+            "float\n"
+            "    Current material density in kilograms per cubic metre."
+        ),
     )
 
 
@@ -128,10 +145,35 @@ def _parameter_property(name: str, doc: str):
     def setter(self, value) -> None:
         getattr(self, f"set_{name}")(value)
 
-    return property(getter, setter, doc=doc)
+    if name.endswith(("_range_mm",)) or name in {
+        "crank_axis_position_mm",
+        "stem_origin_mm",
+        "pedal_size_mm",
+    }:
+        value_type = "tuple[float, ...]"
+    elif name.endswith(("_step", "_steps")):
+        value_type = "int"
+    else:
+        value_type = "float"
+    setter.__doc__ = f"""Set the configured value of :attr:`Bike.{name}`.
+
+    Parameters
+    ----------
+    value : {value_type}
+        New value for this setting, in the units and format described by
+        :attr:`Bike.{name}`.
+    """
+    property_doc = (
+        f"{doc}\n\n"
+        "Returns\n"
+        "-------\n"
+        f"{value_type}\n"
+        "    Current configured value in the units and format stated above."
+    )
+    return property(getter, setter, doc=property_doc)
 
 
-class Bike(opensim.Model):
+class Bike(Equipment):
     """A fixed exercise-bike OpenSim model; only cranks and pedals move.
 
     Conventions (world frame, ground at ``y = 0``): ``x`` points forward,
@@ -150,9 +192,9 @@ class Bike(opensim.Model):
     ``*_step`` index selects the fixed position (default: the middle one).
     Public coordinate and position properties return millimetres; geometry
     construction and OpenSim calculations use metres internally.
-    The default stem origin is calibrated for ``fit_user()``'s 170 cm, 70 kg
-    male reference rider in a 45-degree trunk, 75-degree shoulder and
-    15-degree elbow pose.
+    The default stem origin and handlebar width are calibrated for
+    ``fit_user()``'s 170 cm, 70 kg male reference rider in a 45-degree trunk,
+    75-degree shoulder and 15-degree elbow pose.
 
     Parameters
     ----------
@@ -215,22 +257,22 @@ class Bike(opensim.Model):
         seat_tube_angle_deg: float = 104.0,
         seat_tube_range_mm: Sequence[float] = (250.0, 1200.0),
         seat_tube_steps: int = 20,
-        crank_axis_position_mm: Sequence[float] = (0.0, 250.0, 0.0),
+        crank_axis_position_mm: Sequence[float] = (0.0, 250.0, 100.0),
         seat_height_mm: float = 50.0,
         seat_horizontal_range_mm: Sequence[float] = (-100.0, 100.0),
         seat_horizontal_steps: int = 25,
         seat_slide_angle_deg: float = 0.0,
-        stem_origin_mm: Sequence[float] = (500, 500, 0.0),
+        stem_origin_mm: Sequence[float] = (336.0, 372.5, 0.0),
         stem_excursion_mm: float = 250.0,
         stem_steps: int = 25,
-        stem_angle_deg: float = 102.0,
+        stem_angle_deg: float = 82.0,
         handlebar_horizontal_range_mm: Sequence[float] = (-100.0, 100.0),
         handlebar_horizontal_steps: int = 10,
         handlebar_slide_angle_deg: float = 10.0,
-        crank_length_mm: float = 172.5,
+        crank_length_mm: float = 170.0,
         pedal_size_mm: Sequence[float] = (110.0, 70.0, 25.0),
         handlebar_diameter_mm: float = 25.0,
-        handlebar_width_mm: float = 500.0,
+        handlebar_width_mm: float = 337.5,
         horn_pitch_deg: float = 35.0,
         horn_roll_deg: float = 10.0,
         horn_length_mm: float = 150.0,
@@ -250,7 +292,7 @@ class Bike(opensim.Model):
         frame_margin_mm: float = 300.0,
         screen_width_mm: float = 150.0,
         screen_height_mm: float = 100.0,
-        screen_inclination_deg: float = 65.0,
+        screen_inclination_deg: float = 105.0,
         screen_vertical_offset_mm: float = 100.0,
         screen_horizontal_offset_mm: float = 50.0,
     ):
@@ -381,31 +423,65 @@ class Bike(opensim.Model):
     # --------------------------------------------------------- derived values
     @property
     def seat_tube_positions_mm(self) -> np.ndarray:
-        """All selectable seat tube lengths (mm)."""
+        """Return the discrete seat-tube length settings.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``seat_tube_steps + 1`` evenly spaced lengths in millimetres,
+            including both configured endpoints.
+        """
         return self._positions(*self._seat_tube_range_mm, self._seat_tube_steps)
 
     @property
     def seat_horizontal_positions_mm(self) -> np.ndarray:
-        """All selectable seat slide offsets (mm)."""
+        """Return the discrete seat-slide offsets.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``seat_horizontal_steps + 1`` evenly spaced offsets in
+            millimetres, including both configured endpoints.
+        """
         return self._positions(
             *self._seat_horizontal_range_mm, self._seat_horizontal_steps
         )
 
     @property
     def stem_positions_mm(self) -> np.ndarray:
-        """All selectable stem extensions (mm)."""
+        """Return the discrete stem extensions.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``stem_steps + 1`` evenly spaced extensions from zero to the
+            configured excursion, in millimetres.
+        """
         return self._positions(0.0, self._stem_excursion_mm, self._stem_steps)
 
     @property
     def handlebar_horizontal_positions_mm(self) -> np.ndarray:
-        """All selectable handlebar slide offsets (mm)."""
+        """Return the discrete handlebar-slide offsets.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``handlebar_horizontal_steps + 1`` evenly spaced offsets in
+            millimetres, including both configured endpoints.
+        """
         return self._positions(
             *self._handlebar_horizontal_range_mm, self._handlebar_horizontal_steps
         )
 
     @property
     def crank_axis_position(self) -> np.ndarray:
-        """Pedal axis centre in world coordinates (mm)."""
+        """Return the crank-axis centre in world coordinates.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` crank-axis coordinates in millimetres.
+        """
         return np.asarray(self._crank_axis_position_mm, dtype=float)
 
     @property
@@ -415,7 +491,14 @@ class Bike(opensim.Model):
 
     @property
     def pedal_lateral_offset(self) -> float:
-        """Distance (mm) of each pedal's outer face from the bike's sagittal plane."""
+        """Return each pedal's outer-face offset from the sagittal plane.
+
+        Returns
+        -------
+        float
+            Lateral distance in millimetres. It combines half the spacing
+            between pedal inner faces and the pedal's lateral width.
+        """
         return self._pedal_lateral_offset_m / _MM
 
     @property
@@ -424,11 +507,24 @@ class Bike(opensim.Model):
 
     @property
     def pedal_spacing_mm(self) -> float:
-        """Distance between the inner faces of the pedals, in millimetres."""
+        """Return the distance between the inner faces of the pedals.
+
+        Returns
+        -------
+        float
+            Pedal spacing in millimetres.
+        """
         return self._pedal_spacing_mm
 
     @pedal_spacing_mm.setter
     def pedal_spacing_mm(self, value: float) -> None:
+        """Set pedal spacing and rebuild the OpenSim geometry.
+
+        Parameters
+        ----------
+        value : float
+            Positive distance in millimetres between the pedals' inner faces.
+        """
         self.set_pedal_spacing_mm(value)
 
     def _seat_tube_top_at(self, tube_step: int) -> np.ndarray:
@@ -464,12 +560,25 @@ class Bike(opensim.Model):
 
     @property
     def seat_tube_top(self) -> np.ndarray:
-        """Seat tube top centre in world coordinates (mm)."""
+        """Return the selected seat-tube top centre.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` position in millimetres in the world frame.
+        """
         return self._seat_tube_top_at(self._seat_tube_step) / _MM
 
     @property
     def seat_position(self) -> np.ndarray:
-        """Seat centre in world coordinates (mm); the seat rests on the slide point."""
+        """Return the centre of the seat in world coordinates.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` seat-centre position in millimetres. The seat is
+            centred on the selected seat-slide point.
+        """
         return (
             self._seat_position_at(self._seat_tube_step, self._seat_horizontal_step)
             / _MM
@@ -477,7 +586,13 @@ class Bike(opensim.Model):
 
     @property
     def stem_base(self) -> np.ndarray:
-        """Stem base in world coordinates (mm)."""
+        """Return the stem base position in world coordinates.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` stem-base position in millimetres.
+        """
         return self._stem_base_m / _MM
 
     @property
@@ -486,12 +601,24 @@ class Bike(opensim.Model):
 
     @property
     def stem_top(self) -> np.ndarray:
-        """Stem top centre in world coordinates (mm)."""
+        """Return the selected stem top centre.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` position in millimetres in the world frame.
+        """
         return self._stem_top_at(self._stem_step) / _MM
 
     @property
     def handlebar_position(self) -> np.ndarray:
-        """Handlebar centre point in world coordinates (mm)."""
+        """Return the handlebar centre in world coordinates.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` handlebar-centre position in millimetres.
+        """
         return self._handlebar_position_m / _MM
 
     @property
@@ -508,7 +635,14 @@ class Bike(opensim.Model):
 
     @property
     def screen_base(self) -> np.ndarray:
-        """Screen base centre in world coordinates (mm)."""
+        """Return the screen's lower-centre mounting point.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` screen-base position in millimetres in the world
+            frame.
+        """
         return self._screen_base_m / _MM
 
     @property
@@ -519,27 +653,159 @@ class Bike(opensim.Model):
 
     @property
     def screen_center(self) -> np.ndarray:
-        """Screen centre in world coordinates (mm)."""
+        """Return the screen centre in world coordinates.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3,)
+            ``(x, y, z)`` screen-centre position in millimetres.
+        """
         return self._screen_center_m / _MM
 
     @property
+    def screen(self) -> Screen:
+        """Return the screen dimensions, mounting offsets, and current pose.
+
+        Returns
+        -------
+        Screen
+            Screen descriptor. Its anchor is the selected handlebar centre,
+            and its world-frame lower-centre position is computed from the
+            configured offsets.
+        """
+        return Screen(
+            width_mm=self._screen_width_mm,
+            height_mm=self._screen_height_mm,
+            inclination_deg=self._screen_inclination_deg,
+            position_anchor_m=tuple(map(float, self._handlebar_position_m)),
+            horizontal_offset_mm=self._screen_horizontal_offset_mm,
+            vertical_offset_mm=self._screen_vertical_offset_mm,
+            horizontal_offset_min_mm=1.0,
+            vertical_offset_min_mm=1.0,
+        )
+
+    def set_screen_position(
+        self,
+        horizontal_offset_mm: float,
+        vertical_offset_mm: float,
+        inclination_deg: float,
+    ) -> None:
+        """Set screen offsets and inclination, then rebuild the bike model.
+
+        Parameters
+        ----------
+        horizontal_offset_mm, vertical_offset_mm : float
+            Positive forward and upward screen offsets from the handlebar
+            centre, in millimetres.
+        inclination_deg : float
+            Directed angle of the panel's upward direction from ``+x`` toward
+            ``+y``, in degrees.
+        """
+        self._screen_horizontal_offset_mm = _positive(
+            "screen_horizontal_offset_mm", horizontal_offset_mm
+        )
+        self._screen_vertical_offset_mm = _positive(
+            "screen_vertical_offset_mm", vertical_offset_mm
+        )
+        self._screen_inclination_deg = _finite(
+            "screen_inclination_deg", inclination_deg
+        )
+        self._apply()
+
+    def screen_position_constraints(
+        self, position: tuple[float, float, float]
+    ) -> np.ndarray:
+        """Return screen-corner margins from the handlebar forward/upward bounds.
+
+        Parameters
+        ----------
+        position : tuple of float
+            Candidate ``(horizontal_offset_mm, vertical_offset_mm,
+            inclination_deg)``.
+
+        Returns
+        -------
+        numpy.ndarray, shape (8,)
+            Each screen corner's forward and upward distance from the
+            handlebar centre, in metres. Non-negative values satisfy the
+            placement constraints.
+        """
+        corners = self.screen.corners(position)
+        handlebar = self._handlebar_position_m
+        return np.concatenate(
+            (corners[:, 0] - handlebar[0], corners[:, 1] - handlebar[1])
+        )
+
+    def clone(self) -> Bike:
+        """Create an independent bike with the same configured parameters.
+
+        Returns
+        -------
+        Bike
+            Rebuilt bike with matching dimensions, selected adjustment steps,
+            screen settings, and crank/pedal angles.
+        """
+        parameters: dict[str, Any] = {}
+        for name, parameter in inspect.signature(type(self).__init__).parameters.items():
+            if name == "self" or parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                continue
+            if name == "densities":
+                parameters[name] = dict(self._densities)
+            elif hasattr(self, name):
+                parameters[name] = getattr(self, name)
+            elif hasattr(self, f"_{name}"):
+                parameters[name] = getattr(self, f"_{name}")
+        clone = type(self)(**parameters)
+        clone.set_crank_angle_deg(self.crank_angle_deg)
+        clone.set_pedal_right_angle_deg(self.pedal_right_angle_deg)
+        clone.set_pedal_left_angle_deg(self.pedal_left_angle_deg)
+        return clone
+
+    @property
     def component_masses_kg(self) -> dict[str, float]:
-        """Mass of each component group (kg)."""
+        """Return the mass assigned to each bike component group.
+
+        Returns
+        -------
+        dict[str, float]
+            Component-group names mapped to masses in kilograms.
+        """
         return dict(self._component_masses)
 
     @property
     def total_mass_kg(self) -> float:
-        """Total mass of the bike (kg)."""
+        """Return the total bike mass.
+
+        Returns
+        -------
+        float
+            Sum of the component-group masses in kilograms.
+        """
         return float(sum(self._component_masses.values()))
 
     # ------------------------------------------------------------------ setters
     def set_density(self, component: str, value: float) -> None:
-        """Set the material density (kg/m^3) of one component."""
+        """Set one component group's material density and rebuild the model.
+
+        Parameters
+        ----------
+        component : str
+            Component-group name whose material density is changed.
+        value : float
+            Positive finite density in kilograms per cubic metre.
+        """
         self._store_densities({component: value})
         self._apply()
 
     def set_densities(self, densities: float | Mapping[str, float]) -> None:
-        """Set one density for all components, or a mapping per component."""
+        """Set material densities and rebuild the bike.
+
+        Parameters
+        ----------
+        densities : float or mapping of str to float
+            A scalar applies one positive finite density to every component;
+            a mapping assigns densities individually by component-group name.
+        """
         self._store_densities(densities)
         self._apply()
 
@@ -548,13 +814,34 @@ class Bike(opensim.Model):
         self._reset_state()
 
     def set_crank_angle_deg(self, value: float) -> None:
-        """Rotate the cranks to ``value`` degrees (0 = right crank pointing forward)."""
+        """Set the crank rotation and update the OpenSim state.
+
+        Parameters
+        ----------
+        value : float
+            Directed crank angle in degrees; zero points the right crank
+            forward along world ``+x``.
+        """
         self._set_angle("crank_angle", value)
 
     def set_pedal_right_angle_deg(self, value: float) -> None:
+        """Set the right pedal's rotation about the right crank axis.
+
+        Parameters
+        ----------
+        value : float
+            Pedal angle in degrees, measured in the bike's world XY plane.
+        """
         self._set_angle("pedal_right_angle", value)
 
     def set_pedal_left_angle_deg(self, value: float) -> None:
+        """Set the left pedal's rotation about the left crank axis.
+
+        Parameters
+        ----------
+        value : float
+            Pedal angle in degrees, measured in the bike's world XY plane.
+        """
         self._set_angle("pedal_left_angle", value)
 
     crank_angle_deg = property(
@@ -568,10 +855,24 @@ class Bike(opensim.Model):
     )
 
     def set_brake_force_n(self, value: float) -> None:
+        """Set the applied brake force and rebuild the OpenSim model.
+
+        Parameters
+        ----------
+        value : float
+            Non-negative braking force in newtons.
+        """
         self._brake_force_n = _force("brake_force_n", value)
         self._apply()
 
     def set_pedal_spacing_mm(self, value: float) -> None:
+        """Set the distance between the pedal inner faces.
+
+        Parameters
+        ----------
+        value : float
+            Positive pedal spacing in millimetres.
+        """
         self._pedal_spacing_mm = _positive("pedal_spacing_mm", value)
         self._apply()
 
@@ -867,7 +1168,7 @@ class Bike(opensim.Model):
         returned framework contains ``user`` and ``bike`` with both feet welded
         to their pedals. If ``user`` is omitted, the 170 cm, 70 kg male
         reference user is fitted. See
-        :func:`opensim_extensions.models.bike.fitting.fit_user` for the full
+        :func:`opensim_extensions.models.equipment.bikes.bike.fitting.fit_user` for the full
         procedure.
 
         Parameters

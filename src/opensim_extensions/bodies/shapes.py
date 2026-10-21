@@ -45,7 +45,20 @@ _AXIS_EULER = {
 
 
 def euler_xyz_to_matrix(angles: Sequence[float]) -> np.ndarray:
-    """Rotation matrix of body-fixed X-Y-Z Euler angles (rad), as used by OpenSim."""
+    """Convert body-fixed XYZ Euler angles to a rotation matrix.
+
+    Parameters
+    ----------
+    angles : sequence of float
+        Three rotations ``(x, y, z)`` in radians, using the body-fixed
+        convention expected by OpenSim.
+
+    Returns
+    -------
+    numpy.ndarray, shape (3, 3)
+        Rotation matrix mapping vectors from the shape's natural frame to its
+        parent frame.
+    """
     a, b, c = angles
     rx = np.array([[1, 0, 0], [0, math.cos(a), -math.sin(a)], [0, math.sin(a), math.cos(a)]])
     ry = np.array([[math.cos(b), 0, math.sin(b)], [0, 1, 0], [-math.sin(b), 0, math.cos(b)]])
@@ -54,7 +67,20 @@ def euler_xyz_to_matrix(angles: Sequence[float]) -> np.ndarray:
 
 
 def matrix_to_euler_xyz(matrix: np.ndarray) -> tuple[float, float, float]:
-    """Inverse of :func:`euler_xyz_to_matrix` (``|b| <= pi/2``)."""
+    """Convert a rotation matrix to body-fixed XYZ Euler angles.
+
+    Parameters
+    ----------
+    matrix : numpy.ndarray, shape (3, 3)
+        Rotation matrix expressed using the convention of
+        :func:`euler_xyz_to_matrix`.
+
+    Returns
+    -------
+    tuple of float
+        The ``(x, y, z)`` body-fixed Euler angles in radians, with the middle
+        angle in ``[-pi/2, pi/2]``.
+    """
     b = math.asin(max(-1.0, min(1.0, matrix[0, 2])))
     if abs(matrix[0, 2]) < 1 - 1e-12:
         a = math.atan2(-matrix[1, 2], matrix[2, 2])
@@ -67,7 +93,18 @@ def matrix_to_euler_xyz(matrix: np.ndarray) -> tuple[float, float, float]:
 
 @dataclass
 class Shape:
-    """Base primitive: ``center`` (m) and ``orientation`` (XYZ Euler, rad) in the body frame."""
+    """Base geometric primitive expressed in a body's local frame.
+
+    Parameters
+    ----------
+    center : sequence of float, default=(0, 0, 0)
+        Primitive centre ``(x, y, z)`` in metres in the body frame.
+    orientation : sequence of float, default=(0, 0, 0)
+        Body-fixed XYZ Euler rotation from the primitive's natural axes to the
+        body frame, in radians.
+    color : sequence of float or None, optional
+        Optional RGB display color with components in ``[0, 1]``.
+    """
 
     center: Sequence[float] = (0.0, 0.0, 0.0)
     orientation: Sequence[float] = (0.0, 0.0, 0.0)
@@ -75,6 +112,13 @@ class Shape:
 
     @property
     def volume(self) -> float:
+        """Return the analytic primitive volume in cubic metres.
+
+        Returns
+        -------
+        float
+            Geometric volume. Concrete subclasses provide the formula.
+        """
         raise NotImplementedError
 
     def _local_inertia(self, mass: float) -> np.ndarray:
@@ -86,11 +130,30 @@ class Shape:
 
     @property
     def rotation(self) -> np.ndarray:
-        """Rotation from the shape's natural axes to the body frame."""
+        """Return the shape-to-body rotation matrix.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3, 3)
+            Matrix mapping vectors from the primitive's natural axes to the
+            body frame.
+        """
         return euler_xyz_to_matrix(self.orientation) @ self._axis_rotation()
 
     def inertia_about_center(self, mass: float) -> np.ndarray:
-        """Inertia tensor about the centre, expressed in body-frame axes."""
+        """Rotate the primitive's local inertia tensor into the body frame.
+
+        Parameters
+        ----------
+        mass : float
+            Primitive mass in kilograms.
+
+        Returns
+        -------
+        numpy.ndarray, shape (3, 3)
+            Inertia tensor in kg m² about the primitive centre, expressed in
+            body-frame axes.
+        """
         rotation = self.rotation
         return rotation @ self._local_inertia(mass) @ rotation.T
 
@@ -106,7 +169,15 @@ def _validate(**values: float) -> None:
 
 @dataclass
 class Box(Shape):
-    """Cuboid with full ``size`` (x, y, z) in metres."""
+    """Cuboid primitive.
+
+    Parameters
+    ----------
+    size : sequence of float, default=(1, 1, 1)
+        Full side lengths ``(x, y, z)`` in metres.
+    center, orientation, color
+        See :class:`Shape`.
+    """
 
     size: Sequence[float] = (1.0, 1.0, 1.0)
 
@@ -115,6 +186,13 @@ class Box(Shape):
 
     @property
     def volume(self) -> float:
+        """Return the cuboid volume in cubic metres.
+
+        Returns
+        -------
+        float
+            Product of the three full side lengths.
+        """
         return float(np.prod(self.size))
 
     def _local_inertia(self, mass: float) -> np.ndarray:
@@ -127,7 +205,19 @@ class Box(Shape):
 
 @dataclass
 class Cylinder(Shape):
-    """Solid cylinder of ``radius`` and ``length`` (m) along ``axis`` ('x', 'y' or 'z')."""
+    """Solid cylinder primitive.
+
+    Parameters
+    ----------
+    radius : float, default=0.5
+        Cylinder radius in metres.
+    length : float, default=1.0
+        Full cylinder length in metres.
+    axis : {'x', 'y', 'z'}, default='y'
+        Cylinder axis in the body frame.
+    center, orientation, color
+        See :class:`Shape`.
+    """
 
     radius: float = 0.5
     length: float = 1.0
@@ -140,6 +230,13 @@ class Cylinder(Shape):
 
     @property
     def volume(self) -> float:
+        """Return the solid cylinder volume in cubic metres.
+
+        Returns
+        -------
+        float
+            ``pi * radius**2 * length``.
+        """
         return math.pi * self.radius**2 * self.length
 
     def _axis_rotation(self) -> np.ndarray:
@@ -155,7 +252,19 @@ class Cylinder(Shape):
 
 @dataclass
 class Disk(Cylinder):
-    """Thin cylinder: ``radius`` and ``thickness`` (m); the disk normal is ``axis``."""
+    """Thin cylinder whose axis is the disk normal.
+
+    Parameters
+    ----------
+    radius : float, default=0.5
+        Disk radius in metres.
+    thickness : float, default=0.005
+        Disk thickness in metres.
+    axis : {'x', 'y', 'z'}, default='z'
+        Disk normal in the body frame.
+    center, orientation, color
+        See :class:`Shape`.
+    """
 
     thickness: float = 0.005
     length: float = field(init=False, default=0.005)
@@ -167,7 +276,21 @@ class Disk(Cylinder):
 
 @dataclass
 class Tube(Cylinder):
-    """Hollow cylinder with ``radius`` (outer), ``inner_radius`` and ``length`` (m)."""
+    """Hollow cylindrical primitive.
+
+    Parameters
+    ----------
+    radius : float, default=0.5
+        Outer radius in metres.
+    inner_radius : float, default=0.0
+        Inner radius in metres; must be smaller than ``radius``.
+    length : float, default=1.0
+        Full tube length in metres.
+    axis : {'x', 'y', 'z'}, default='y'
+        Tube axis in the body frame.
+    center, orientation, color
+        See :class:`Shape`.
+    """
 
     inner_radius: float = 0.0
 
@@ -178,6 +301,13 @@ class Tube(Cylinder):
 
     @property
     def volume(self) -> float:
+        """Return the hollow-cylinder volume in cubic metres.
+
+        Returns
+        -------
+        float
+            ``pi * (radius**2 - inner_radius**2) * length``.
+        """
         return math.pi * (self.radius**2 - self.inner_radius**2) * self.length
 
     def _local_inertia(self, mass: float) -> np.ndarray:
@@ -188,7 +318,15 @@ class Tube(Cylinder):
 
 @dataclass
 class Sphere(Shape):
-    """Solid sphere of ``radius`` (m)."""
+    """Solid sphere primitive.
+
+    Parameters
+    ----------
+    radius : float, default=0.5
+        Sphere radius in metres.
+    center, orientation, color
+        See :class:`Shape`.
+    """
 
     radius: float = 0.5
 
@@ -197,6 +335,13 @@ class Sphere(Shape):
 
     @property
     def volume(self) -> float:
+        """Return the sphere volume in cubic metres.
+
+        Returns
+        -------
+        float
+            ``4 * pi * radius**3 / 3``.
+        """
         return 4.0 / 3.0 * math.pi * self.radius**3
 
     def _local_inertia(self, mass: float) -> np.ndarray:
@@ -208,7 +353,15 @@ class Sphere(Shape):
 
 @dataclass
 class Ellipsoid(Shape):
-    """Ellipsoid with semi-axes ``radii`` (x, y, z) in metres."""
+    """Ellipsoid primitive.
+
+    Parameters
+    ----------
+    radii : sequence of float, default=(0.5, 0.5, 0.5)
+        Semi-axis lengths ``(x, y, z)`` in metres.
+    center, orientation, color
+        See :class:`Shape`.
+    """
 
     radii: Sequence[float] = (0.5, 0.5, 0.5)
 
@@ -217,6 +370,13 @@ class Ellipsoid(Shape):
 
     @property
     def volume(self) -> float:
+        """Return the ellipsoid volume in cubic metres.
+
+        Returns
+        -------
+        float
+            ``4 * pi * rx * ry * rz / 3``.
+        """
         return float(4.0 / 3.0 * math.pi * np.prod(self.radii))
 
     def _local_inertia(self, mass: float) -> np.ndarray:
@@ -236,7 +396,33 @@ class Ellipsoid(Shape):
 def cylinder_between(
     start: Sequence[float], end: Sequence[float], radius: float, inner_radius: float = 0.0
 ) -> Cylinder:
-    """Cylinder (or tube, if ``inner_radius`` > 0) whose axis joins two points (m)."""
+    """Create a cylinder or hollow tube aligned between two points.
+
+    The helper computes the segment length and rotation from the body-frame
+    y axis to the direction from ``start`` to ``end``. A positive
+    ``inner_radius`` creates a ``Tube``; zero creates a solid ``Cylinder``.
+
+    Parameters
+    ----------
+    start, end : sequence of float
+        Distinct endpoint coordinates ``(x, y, z)`` in metres in the body
+        frame.
+    radius : float
+        Outer radius in metres.
+    inner_radius : float, default=0.0
+        Inner radius in metres; zero denotes a solid cylinder.
+
+    Returns
+    -------
+    Cylinder or Tube
+        Primitive centred at the midpoint and oriented along the endpoint
+        segment.
+
+    Raises
+    ------
+    ValueError
+        If the endpoints coincide.
+    """
     start, end = np.asarray(start, float), np.asarray(end, float)
     delta = end - start
     length = float(np.linalg.norm(delta))

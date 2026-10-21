@@ -9,9 +9,10 @@ window embedding the (VTK-based, see :mod:`opensim_extensions.viewer.visualizer`
   ``show(motion=...)`` -- disabled whenever no motion is loaded, rather
   than the controls disappearing, so there is always somewhere to look
   for them.
-- View (ground/muscles/markers/axes visibility toggles, and a preset-camera
-  dropdown) -- unlike the playback controls, never disabled, since these
-  act on the 3D view itself rather than a loaded motion.
+- View (ground/muscles/markers/axes, reachability, and visual-cone visibility
+  toggles, plus a preset-camera dropdown) -- unlike the playback controls,
+  never disabled, since these act on the 3D view itself rather than a loaded
+  motion.
 - Export (save the current view as a PNG, or a loaded motion as an MP4 --
   see :mod:`opensim_extensions.viewer.export`); the animation button is disabled
   under the same condition as the playback controls, since there is
@@ -149,12 +150,24 @@ class MotionData:
 
     @property
     def start_time(self) -> float:
-        """Return the motion's first sample time, in seconds."""
+        """Return the time of the first motion sample.
+
+        Returns
+        -------
+        float
+            First sample time in seconds.
+        """
         return float(self.times[0])
 
     @property
     def end_time(self) -> float:
-        """Return the motion's last sample time, in seconds."""
+        """Return the time of the last motion sample.
+
+        Returns
+        -------
+        float
+            Last sample time in seconds.
+        """
         return float(self.times[-1])
 
     def values_at(self, time: float) -> dict[str, float]:
@@ -167,6 +180,13 @@ class MotionData:
         ----------
         time : float
             Query time, in seconds.
+
+        Returns
+        -------
+        dict[str, float]
+            Motion column names mapped to interpolated values. Rotational
+            coordinates are in radians and translational coordinates are in
+            metres; values outside the sample interval use the nearest endpoint.
         """
         clamped = min(max(time, self.start_time), self.end_time)
         return {
@@ -209,12 +229,25 @@ class MotionPlayer:
 
     @property
     def speed(self) -> float:
-        """Return the current signed playback speed (multiples of real time)."""
+        """Return the current signed playback speed.
+
+        Returns
+        -------
+        float
+            Playback multiplier relative to real time. Negative values play
+            backward.
+        """
         return _SPEED_STEPS[self._speed_index]
 
     @property
     def fraction(self) -> float:
-        """Return how far through the motion :attr:`time` is, in ``[0, 1]``."""
+        """Return the normalized position in the motion.
+
+        Returns
+        -------
+        float
+            Fraction from ``0`` at ``start_time`` to ``1`` at ``end_time``.
+        """
         span = self.end_time - self.start_time
         return (self.time - self.start_time) / span if span else 0.0
 
@@ -251,7 +284,14 @@ class MotionPlayer:
         self.playing = True
 
     def seek_fraction(self, fraction: float) -> None:
-        """Jump directly to ``fraction`` (in ``[0, 1]``) through the motion."""
+        """Seek to a normalized position in the motion.
+
+        Parameters
+        ----------
+        fraction : float
+            Requested position from ``0`` (start) to ``1`` (end). Values
+            outside this interval are clamped to the nearest endpoint.
+        """
         fraction = min(max(fraction, 0.0), 1.0)
         self.time = self.start_time + fraction * (self.end_time - self.start_time)
 
@@ -603,6 +643,32 @@ def start_player(
         )
         axes_check.grid(row=0, column=3, padx=2, sticky="w")
 
+        vision_cone_var = tk.BooleanVar(value=True)
+
+        def do_toggle_vision_cone() -> None:
+            model.visualizer.set_vision_cone_visible(vision_cone_var.get())
+
+        vision_cone_check = ttk.Checkbutton(
+            view_group,
+            text="Vision cone + axis",
+            variable=vision_cone_var,
+            command=do_toggle_vision_cone,
+        )
+        vision_cone_check.grid(row=2, column=0, columnspan=2, padx=2, sticky="w")
+
+        reachability_var = tk.BooleanVar(value=True)
+
+        def do_toggle_reachability() -> None:
+            model.visualizer.set_reachability_visible(reachability_var.get())
+
+        reachability_check = ttk.Checkbutton(
+            view_group,
+            text="Reachability",
+            variable=reachability_var,
+            command=do_toggle_reachability,
+        )
+        reachability_check.grid(row=2, column=2, columnspan=2, padx=2, sticky="w")
+
         def do_set_view(event: Any = None) -> None:
             model.visualizer.set_view(view_var.get().lower())
 
@@ -712,6 +778,11 @@ def start_player(
         # this thread's own teardown), so reading it late could close the
         # wrong (new) visualizer instead of this thread's own (old) one.
         visualizer = model._visualizer
+
+        if not visualizer.has_vision_cone_and_axis:
+            vision_cone_check.config(state="disabled")
+        if not visualizer.has_reachability_regions:
+            reachability_check.config(state="disabled")
 
         root.update_idletasks()
         root.geometry(f"{default_width}x{default_height + controls_frame.winfo_reqheight()}")

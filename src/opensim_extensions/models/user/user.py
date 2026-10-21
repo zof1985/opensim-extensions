@@ -85,13 +85,16 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
     see :attr:`mass_kg`) rather than whatever the geometric scaling alone
     produces volumetrically; unlike every other anthropometric parameter
     here, total mass can also be recalibrated after construction, via
-    :meth:`set_mass_kg`.     Every joint angle is exposed through a
+    :meth:`set_mass_kg`. Every joint angle is exposed through a
     ``set_<joint>_<motion>``/``<joint>_<motion>`` setter/getter pair.
     Anthropometric dimensions have explicit measurement setters and
     properties. Bilateral setters (for example ``set_left_arm_length`` and
     ``set_right_arm_length``) scale only their corresponding side; ANSUR's
     shared measurements provide equal initial values until one side is
-    overridden.
+    overridden. Each hand body is connected to its radius by a universal
+    wrist joint with independent flexion/extension and radial/ulnar-deviation
+    coordinates. ``RPALM`` and ``LPALM`` are hand-attached markers at the
+    anthropometric palm centres, repositioned after body scaling.
 
     Parameters
     ----------
@@ -204,7 +207,14 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         self._mass_kg = target_mass_kg
 
     def _add_anatomical_bodies(self) -> None:
-        """Separate the cervical spine and skull into articulated bodies."""
+        """Create articulated head segments and anatomical eye/palm markers.
+
+        The skull and neck are separated from the torso, their mesh geometry
+        is reassigned, and cervical joints are added. Eye markers are attached
+        to the skull. Palm-centre markers are attached to the existing
+        articulated hand bodies; their final local offsets are updated after
+        anthropometric scaling.
+        """
         torso = self.getBodySet().get("torso")
         head_meshes = []
         spine_mesh = None
@@ -338,7 +348,11 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
             coordinates.get(index).set_locked(False)
 
     def update_state(self) -> None:
-        """Realize the current posture, velocity, and muscle equilibrium."""
+        """Realize the model through position, velocity, and dynamics stages.
+
+        The method first realizes position and velocity, equilibrates muscles
+        when the model contains any, and then realizes dynamics.
+        """
         self.realizePosition(self.state)
         self.realizeVelocity(self.state)
         if self.getMuscles().getSize():
@@ -372,13 +386,21 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
             )
 
     def reinitialize(self) -> None:
-        """Rebuild the OpenSim system while preserving coordinate values."""
+        """Rebuild the OpenSim system while preserving current coordinates.
+
+        Current coordinate values are copied to their defaults, dependent
+        coordinate defaults are recalculated from their coupler functions,
+        model connections are finalized, and a fresh system state is created.
+        """
         self._sync_coordinate_defaults()
         self.finalizeConnections()
         self.state = self.initSystem()
 
     def scale_bodies(self, factors: dict[str, tuple[float, float, float]]) -> None:
         """Apply OpenSim's native body scaling and preserve the current state.
+
+        After scaling, each palm marker is repositioned at half the resolved
+        palm length from the wrist along the hand's local negative y axis.
 
         Parameters
         ----------
@@ -406,23 +428,54 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
             scale.setApply(True)
             scale_set.adoptAndAppend(scale)
         self.scale(self.state, scale_set, True)
+        for side in ("left", "right"):
+            marker = self.getMarkerSet().get(
+                "LPALM" if side == "left" else "RPALM"
+            )
+            marker.set_location(
+                self.opensim.Vec3(
+                    0.0,
+                    -float(getattr(self, f"{side}_palm_length")) / 2,
+                    0.0,
+                )
+            )
         self._sync_coordinate_defaults()
         self.state = self.initSystem()
 
     def add_geometry_directory(self, directory: str | Path) -> None:
-        """Register a directory containing geometry files for this model."""
+        """Register a directory containing geometry files for this model.
+
+        Parameters
+        ----------
+        directory : str or pathlib.Path
+            Directory to resolve and register with OpenSim's geometry search
+            path.
+        """
         path = Path(directory).expanduser().resolve()
         register_geometry_search_path(self.opensim, path)
         self._geometry_dirs.append(path)
 
     @property
     def geometry_directories(self) -> tuple[Path, ...]:
-        """Return the geometry directories registered for this user."""
+        """Return the geometry directories registered for this user.
+
+        Returns
+        -------
+        tuple of pathlib.Path
+            Resolved directories registered for mesh lookup, in registration
+            order.
+        """
         return tuple(self._geometry_dirs)
 
     @property
     def visualizer(self) -> Any | None:
-        """Return the active VTK visualizer, if this user is being displayed."""
+        """Return the active VTK visualizer, if one is displaying this user.
+
+        Returns
+        -------
+        VTKVisualizer or None
+            Active visualizer, or ``None`` when the user is not shown.
+        """
         return self._visualizer
 
     def show(
@@ -594,48 +647,109 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         return math.degrees(value)
 
     def set_neck_flexion(self, degrees: float) -> None:
-        """Set the neck flexion/extension coordinate in degrees."""
+        """Set head flexion/extension relative to the neck base.
+
+        Parameters
+        ----------
+        degrees : float
+            Target angle in degrees. Positive values follow the OpenSim
+            coordinate's flexion direction.
+        """
         self._set_coordinate_degrees("neck_flexion", degrees)
 
     @property
     def neck_flexion(self) -> float:
-        """Return the neck flexion/extension coordinate in degrees."""
+        """Return the current head flexion/extension angle.
+
+        Returns
+        -------
+        float
+            ``neck_flexion`` coordinate in degrees.
+        """
         return self._coordinate_degrees("neck_flexion")
 
     def set_neck_lateral_flexion(self, degrees: float) -> None:
-        """Set the neck lateral-flexion coordinate in degrees."""
+        """Set lateral flexion of the head relative to the neck base.
+
+        Parameters
+        ----------
+        degrees : float
+            Target lateral-flexion angle in degrees.
+        """
         self._set_coordinate_degrees("neck_lateral_flexion", degrees)
 
     @property
     def neck_lateral_flexion(self) -> float:
-        """Return the neck lateral-flexion coordinate in degrees."""
+        """Return the current head lateral-flexion angle.
+
+        Returns
+        -------
+        float
+            ``neck_lateral_flexion`` coordinate in degrees.
+        """
         return self._coordinate_degrees("neck_lateral_flexion")
 
     def set_neck_rotation(self, degrees: float) -> None:
-        """Set the neck axial-rotation coordinate in degrees."""
+        """Set axial rotation of the head relative to the neck base.
+
+        Parameters
+        ----------
+        degrees : float
+            Target axial-rotation angle in degrees.
+        """
         self._set_coordinate_degrees("neck_rotation", degrees)
 
     @property
     def neck_rotation(self) -> float:
-        """Return the neck axial-rotation coordinate in degrees."""
+        """Return the current head axial-rotation angle.
+
+        Returns
+        -------
+        float
+            ``neck_rotation`` coordinate in degrees.
+        """
         return self._coordinate_degrees("neck_rotation")
 
     def set_neck_base_flexion(self, degrees: float) -> None:
-        """Set flexion/extension of the neck at its base, in degrees."""
+        """Set flexion/extension of the cervical spine relative to the torso.
+
+        Parameters
+        ----------
+        degrees : float
+            Target angle in degrees.
+        """
         self._set_coordinate_degrees("neck_base_flexion", degrees)
 
     @property
     def neck_base_flexion(self) -> float:
-        """Return flexion/extension of the neck at its base, in degrees."""
+        """Return cervical flexion/extension relative to the torso.
+
+        Returns
+        -------
+        float
+            ``neck_base_flexion`` coordinate in degrees.
+        """
         return self._coordinate_degrees("neck_base_flexion")
 
     def set_neck_base_lateral_flexion(self, degrees: float) -> None:
-        """Set lateral flexion of the neck at its base, in degrees."""
+        """Set cervical lateral flexion relative to the torso.
+
+        Parameters
+        ----------
+        degrees : float
+            Target lateral-flexion angle in degrees.
+        """
         self._set_coordinate_degrees("neck_base_lateral_flexion", degrees)
 
     @property
     def neck_base_lateral_flexion(self) -> float:
-        """Return lateral flexion of the neck at its base, in degrees."""
+        """Return cervical lateral flexion relative to the torso.
+
+        Returns
+        -------
+        float
+            ``neck_base_lateral_flexion`` coordinate in degrees.
+        """
         return self._coordinate_degrees("neck_base_lateral_flexion")
 
     def _rescale_total_mass(self, mass_kg: float) -> None:
@@ -951,7 +1065,14 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
 
     @property
     def eye_markers(self) -> dict[str, tuple[float, float, float]]:
-        """Return the right and left orbital marker locations in ground coordinates."""
+        """Return the right and left orbital marker positions.
+
+        Returns
+        -------
+        dict[str, tuple[float, float, float]]
+            Mapping from ``"right"`` and ``"left"`` to the corresponding eye
+            marker's ``(x, y, z)`` position in metres in the ground frame.
+        """
         return {
             side: self._marker_location(marker)
             for side, marker in (("right", "REYE"), ("left", "LEYE"))
@@ -959,7 +1080,21 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
 
     @property
     def palm_markers(self) -> dict[str, tuple[float, float, float]]:
-        """Return the right and left palm-centre marker locations in ground coordinates."""
+        """Return the articulated right and left palm-centre marker positions.
+
+        Each marker is attached to its corresponding hand body at the centre
+        of the resolved palm, halfway from the wrist along the hand's local
+        negative y axis. The hand bodies are connected to the radii by
+        universal wrist joints with flexion/extension and radial/ulnar
+        deviation coordinates. Marker positions therefore follow the current
+        wrist posture and are expressed in the ground frame.
+
+        Returns
+        -------
+        dict[str, tuple[float, float, float]]
+            Mapping from ``"right"`` and ``"left"`` to the corresponding
+            palm-centre ``(x, y, z)`` positions in metres in the ground frame.
+        """
         return {
             side: self._marker_location(marker)
             for side, marker in (("right", "RPALM"), ("left", "LPALM"))

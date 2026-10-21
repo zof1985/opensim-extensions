@@ -9,9 +9,9 @@ from typing import Any
 import numpy as np
 from scipy.optimize import least_squares, minimize_scalar
 
-from ...bodies.shapes import matrix_to_euler_xyz
-from ...framework import Framework
-from ...opensim import import_opensim
+from .....bodies.shapes import matrix_to_euler_xyz
+from .....framework import Framework
+from .....opensim import import_opensim
 from .bike import _horn_direction
 
 __all__ = ["fit_user"]
@@ -501,13 +501,11 @@ def fit_user(
     4. The trunk starts at the user's current ``lumbar_extension`` when
        ``trunk_angle_deg`` is ``None``, otherwise at the requested inclination
        (forward from the vertical, of the mid-hip to mid-shoulder line;
-       0 = upright, pelvis upright). When inverse-kinematics adjustment is
-       enabled, the trunk and arm angles can adapt to place the hands on the
-       horns; with ``trunk_angle_deg=None``, the initial trunk posture is the
-       starting reference rather than a fixed target. In this mode, the stem
-       step brings the handlebar centre as close as possible to the seat top
-       height. Shoulder flexion and elbow flexion are shared between sides;
-       shoulder adduction remains independently adjustable.
+       0 = upright, pelvis upright). A specified trunk angle is kept fixed;
+       when it is ``None``, inverse kinematics may adapt it to place the hands
+       on the horns while the stem is selected to bring the handlebar centre
+       near seat-top height. Shoulder flexion and elbow flexion are shared
+       between sides; shoulder adduction remains independently adjustable.
 
     The solution is the best available among the discrete steps; a
     ``UserWarning`` is issued when a constraint cannot be met within 5 mm.
@@ -523,16 +521,16 @@ def fit_user(
     shoe_height_cm : float, default=3.0
         Sole height of the shoes in centimetres.
     trunk_angle_deg : float or None, default=45.0
-        Trunk inclination in degrees; ``None`` uses the user's current lumbar
-        posture as the starting reference, which inverse kinematics may adjust.
+        Fixed trunk inclination in degrees. ``None`` starts from the user's
+        current lumbar posture and lets inverse kinematics adjust the trunk.
     shoulder_flexion_deg : float, default=75.0
         Desired shoulder flexion (``arm_flex``) in degrees.
     elbow_flexion_deg : float, default=15.0
         Desired elbow flexion (``elbow_flex``) in degrees; 0 is a straight arm.
     allow_ik_adjustment : bool, default=True
-        Allow inverse kinematics to adjust the requested trunk, shoulder and
-        elbow flexions. When false, these angles remain fixed while other
-        degrees of freedom, such as shoulder adduction, can still be fitted.
+        Allow inverse kinematics to adjust shoulder and elbow flexions and,
+        when ``trunk_angle_deg`` is ``None``, the trunk. When false, these
+        angles remain fixed while shoulder adduction can still be fitted.
 
     Returns
     -------
@@ -540,7 +538,7 @@ def fit_user(
         Framework with members ``user`` and ``bike``, and the couplings
         ``foot_right`` and ``foot_left``.
     """
-    from ..user import User
+    from .....models.user import User
 
     if user is None:
         user = User("M", height_cm=170.0, mass_kg=70.0)
@@ -611,7 +609,7 @@ def fit_user(
 
     def fit_arms(grips: np.ndarray) -> dict[str, Any]:
         if allow_ik_adjustment:
-            return arms.solve(grips, adjust_trunk=True)
+            return arms.solve(grips, adjust_trunk=trunk_angle_deg is None)
         return arms.solve_with_fixed_flexions(grips)
 
     def grips_at(stem: int, slide: int) -> np.ndarray:

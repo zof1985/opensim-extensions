@@ -260,6 +260,8 @@ class VTKVisualizer:
         self._marker_items: list[tuple[Any, Any]] = []
         self._muscles_visible = True
         self._markers_visible = True
+        self._reachability_visible = True
+        self._vision_cone_visible = True
 
         self._build_actors()
         self._build_muscle_actors()
@@ -284,6 +286,38 @@ class VTKVisualizer:
         self._axes_actor = self._build_axes_actor()
         self._renderer.AddActor(self._axes_actor)
         self._render_window.Render()
+
+    @property
+    def has_reachability_regions(self) -> bool:
+        """Report whether at least one reachability surface is present.
+
+        Returns
+        -------
+        bool
+            ``True`` when at least one reachability surface has renderable
+            geometry in the model.
+        """
+        return any(
+            body.getName().rsplit("/", 1)[-1].startswith("reach_")
+            for body, _ in self._actor_bodies
+        )
+
+    @property
+    def has_vision_cone_and_axis(self) -> bool:
+        """Report whether both the visual cone and its central axis exist.
+
+        Returns
+        -------
+        bool
+            ``True`` when the model contains renderable geometry for both the
+            visual cone and its central-axis line.
+        """
+        names = {
+            body.getName().rsplit("/", 1)[-1] for body, _ in self._actor_bodies
+        }
+        return any(name.startswith("vision_cone_shape") for name in names) and any(
+            name.startswith("vision_cone_axis_shape") for name in names
+        )
 
     def _window_title(self) -> str:
         name = self._model.getName()
@@ -318,6 +352,11 @@ class VTKVisualizer:
         at the render is a human watching the live window or something
         reading pixels back from it (e.g. a future screenshot/video
         export).
+
+        Parameters
+        ----------
+        visible : bool
+            Whether the ground plane is rendered.
         """
         self._ground_actor.SetVisibility(bool(visible))
         self._render_window.Render()
@@ -354,8 +393,41 @@ class VTKVisualizer:
         thing whether what is looking at the render is a human watching
         the live window or something reading pixels back from it (e.g. a
         future screenshot/video export).
+
+        Parameters
+        ----------
+        visible : bool
+            Whether the ground-frame axes are rendered.
         """
         self._axes_actor.SetVisibility(bool(visible))
+        self._render_window.Render()
+
+    def set_reachability_visible(self, visible: bool) -> None:
+        """Show or hide both palm reachability surfaces, and redraw.
+
+        Parameters
+        ----------
+        visible : bool
+            Whether the right and left reachability regions are rendered.
+        """
+        self._reachability_visible = bool(visible)
+        for body, actor in self._actor_bodies:
+            if body.getName().rsplit("/", 1)[-1].startswith("reach_"):
+                actor.SetVisibility(self._reachability_visible)
+        self._render_window.Render()
+
+    def set_vision_cone_visible(self, visible: bool) -> None:
+        """Show or hide the visual cone and its central axis, and redraw.
+
+        Parameters
+        ----------
+        visible : bool
+            Whether the visual cone and central-axis line are rendered.
+        """
+        self._vision_cone_visible = bool(visible)
+        for body, actor in self._actor_bodies:
+            if body.getName().rsplit("/", 1)[-1].startswith("vision_cone"):
+                actor.SetVisibility(self._vision_cone_visible)
         self._render_window.Render()
 
     def _model_display_name(self) -> str:
@@ -382,11 +454,23 @@ class VTKVisualizer:
             mapper.SetInputConnection(source.GetOutputPort())
             actor = self._vtk.vtkActor()
             actor.SetMapper(mapper)
+            body_name = body.getName().rsplit("/", 1)[-1]
             # an actor's default (unset) material is plain white, which
             # under VTK's default headlight looks indistinguishable from
             # the light-gray background it was mistaken for exactly that,
             # at a glance, more than once while debugging this module.
             actor.GetProperty().SetColor(0.75, 0.76, 0.8)
+            appearance = geometry.get_Appearance()
+            opacity = appearance.get_opacity()
+            if opacity < 1.0 or body_name.startswith("vision_cone_axis"):
+                color = geometry.getColor()
+                actor.GetProperty().SetColor(color.get(0), color.get(1), color.get(2))
+            if opacity < 1.0:
+                actor.GetProperty().SetOpacity(opacity)
+            if body_name.startswith("reach_"):
+                actor.SetVisibility(self._reachability_visible)
+            elif body_name.startswith("vision_cone"):
+                actor.SetVisibility(self._vision_cone_visible)
             self._renderer.AddActor(actor)
             self._actor_bodies.append((body, actor))
             self._actor_components[actor] = (model_name, body.getName())
@@ -450,14 +534,26 @@ class VTKVisualizer:
         mapper.SetInputConnection(tube.GetOutputPort())
 
     def set_muscles_visible(self, visible: bool) -> None:
-        """Show or hide every muscle path, and redraw."""
+        """Show or hide all rendered muscle paths.
+
+        Parameters
+        ----------
+        visible : bool
+            Whether muscle paths are rendered.
+        """
         self._muscles_visible = bool(visible)
         for _, _, actor in self._muscle_items:
             actor.SetVisibility(self._muscles_visible)
         self._render_window.Render()
 
     def set_markers_visible(self, visible: bool) -> None:
-        """Show or hide every marker sphere, and redraw."""
+        """Show or hide all rendered marker spheres.
+
+        Parameters
+        ----------
+        visible : bool
+            Whether marker spheres are rendered.
+        """
         self._markers_visible = bool(visible)
         for _, actor in self._marker_items:
             actor.SetVisibility(self._markers_visible)
@@ -470,7 +566,26 @@ class VTKVisualizer:
         focal_point: tuple[float, float, float] | None = None,
         view_up: tuple[float, float, float] | None = None,
     ) -> None:
-        """Set selected camera vectors, retaining current values for omitted ones."""
+        """Set camera position, target, and up direction selectively.
+
+        Omitted vectors retain their current values. The requested vectors
+        must define a non-degenerate viewing direction.
+
+        Parameters
+        ----------
+        position : tuple of float or None, optional
+            Camera ``(x, y, z)`` position in world coordinates.
+        focal_point : tuple of float or None, optional
+            World-frame ``(x, y, z)`` point at which the camera looks.
+        view_up : tuple of float or None, optional
+            World-frame direction defining the camera's vertical orientation.
+
+        Raises
+        ------
+        ValueError
+            If the resulting position, focal point, and up direction are
+            degenerate or collinear.
+        """
         camera = self._renderer.GetActiveCamera()
         current_position = camera.GetPosition()
         current_focal_point = camera.GetFocalPoint()
@@ -511,6 +626,16 @@ class VTKVisualizer:
         :meth:`set_ground_visible`/:meth:`set_muscles_visible`/
         :meth:`set_markers_visible`/:meth:`set_axes_visible` first if those
         should be excluded from the framing.
+
+        Parameters
+        ----------
+        name : str
+            Preset view name from :data:`VIEW_NAMES`.
+
+        Returns
+        -------
+        None
+            The active camera is updated and the render window is redrawn.
 
         Raises
         ------
@@ -587,6 +712,13 @@ class VTKVisualizer:
         :mod:`opensim_extensions.viewer.player`'s tick loop, which renders it as
         a floating tooltip next to the cursor via
         :class:`~opensim_extensions.viewer.tooltip.HoverTooltip`).
+
+        Returns
+        -------
+        tuple[str, float, float, float] or None
+            Picked component label and its ground-frame ``(x, y, z)``
+            position in metres, or ``None`` if no rendered geometry is under
+            the pointer.
         """
         with self._hover_lock:
             return self._hover_info
@@ -601,6 +733,11 @@ class VTKVisualizer:
         the image (standard image-array convention): VTK's own pixel
         buffer is bottom-up, flipped here so callers don't have to know
         that.
+
+        Returns
+        -------
+        numpy.ndarray, shape (height, width, 3), dtype uint8
+            RGB image of the current render window, with row zero at the top.
         """
         import numpy as np
         from vtkmodules.util.numpy_support import vtk_to_numpy
@@ -638,6 +775,12 @@ class VTKVisualizer:
         Same signature as ``opensim.ModelVisualizer.show(state)``, so
         anything already written against that (e.g.
         :mod:`opensim_extensions.viewer.player`) drives this the same way.
+
+        Parameters
+        ----------
+        state : opensim.State
+            State whose body transforms, muscle paths, and marker positions
+            are copied into the rendered actors.
         """
         self._model.realizePosition(state)
         for body, actor in self._actor_bodies:
@@ -671,7 +814,13 @@ class VTKVisualizer:
             self._interactor.ProcessEvents()
 
     def get_size(self) -> tuple[int, int]:
-        """Return the current render window size in pixels, as ``(width, height)``."""
+        """Return the current render-window dimensions.
+
+        Returns
+        -------
+        tuple[int, int]
+            Window size in pixels, ordered as ``(width, height)``.
+        """
         width, height = self._render_window.GetSize()
         return (width, height)
 
@@ -680,6 +829,13 @@ class VTKVisualizer:
 
         Called by :mod:`opensim_extensions.viewer.player` whenever the Tk frame this
         window is embedded into is resized, to keep the two in sync.
+
+        Parameters
+        ----------
+        width : int
+            New render-window width in pixels.
+        height : int
+            New render-window height in pixels.
         """
         self._render_window.SetSize(width, height)
         self._render_window.Render()
@@ -691,6 +847,12 @@ class VTKVisualizer:
         into its own Tk frame -- no window search needed (unlike the old
         Simbody visualizer, a separate process), since this window was
         created in this same process.
+
+        Returns
+        -------
+        object
+            Native window identifier. On Windows this is a SWIG-encoded
+            pointer that :func:`hwnd_from_vtk_window_id` can decode.
         """
         return self._render_window.GetGenericWindowId()
 

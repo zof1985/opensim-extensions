@@ -7,3 +7,4 @@ __pycache__/
 opensim.log
 .vscode/
 opensim-models.code-workspace
+valuta.py

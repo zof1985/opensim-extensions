@@ -431,6 +431,13 @@ def test_user_has_articulated_skull_eye_palm_markers_and_wrist_joints():
         ("LPALM", "hand_l"),
     ):
         assert markers.get(marker_name).getParentFrameName() == f"/bodyset/{parent}"
+    for marker_name, palm_length in (
+        ("RPALM", user.right_palm_length),
+        ("LPALM", user.left_palm_length),
+    ):
+        assert markers.get(marker_name).get_location().get(1) == pytest.approx(
+            -palm_length / 2
+        )
     for side in ("r", "l"):
         wrist_joint = joints.get(f"radius_hand_{side}")
         assert wrist_joint.getConcreteClassName() == "UniversalJoint"

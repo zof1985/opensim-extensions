@@ -40,6 +40,25 @@ def build_source(
     size instead of the generic unscaled one baked into the mesh file,
     which would otherwise visibly detach a long bone's rendered geometry
     from its (correctly scaled) neighboring joints.
+
+    Parameters
+    ----------
+    vtk : module
+        VTK bindings used to construct sources, readers, and scale filters.
+    opensim : module
+        OpenSim bindings used to distinguish the supported geometry types.
+    geometry : opensim.DecorativeGeometry
+        Geometry component to convert.
+    resolve_file : callable
+        Function mapping a stored mesh filename to a resolved ``Path`` or
+        ``None``.
+
+    Returns
+    -------
+    vtkAlgorithm or None
+        A procedural source or file reader, optionally wrapped in a scale
+        filter. Returns ``None`` for unsupported geometry or an unresolved
+        mesh file.
     """
     mesh = opensim.Mesh.safeDownCast(geometry)
     if mesh is not None:
@@ -113,6 +132,24 @@ def local_bounds(
     type :func:`build_source` handles, procedural or file-based: all of
     them produce an actual ``vtkPolyDataAlgorithm``, whose own
     ``GetOutput().GetBounds()`` is the real, exact bounding box either way.
+
+    Parameters
+    ----------
+    vtk : module
+        VTK bindings used to create geometry sources.
+    opensim : module
+        OpenSim bindings used to identify the geometry component type.
+    geometry : opensim.DecorativeGeometry
+        Geometry whose local bounds are requested.
+    resolve_file : callable
+        Function mapping a stored mesh filename to a resolved ``Path`` or
+        ``None``.
+
+    Returns
+    -------
+    tuple of float or None
+        ``(xmin, xmax, ymin, ymax, zmin, zmax)`` in metres, or ``None`` when
+        the geometry has no resolvable source.
     """
     source = build_source(vtk, opensim, geometry, resolve_file)
     if source is None:

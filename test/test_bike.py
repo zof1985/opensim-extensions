@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from opensim_extensions import Bike, User
+from opensim_extensions import Bike, Equipment, Screen, User
 from opensim_extensions.bodies import (
     Box,
     Cylinder,
@@ -18,7 +18,7 @@ from opensim_extensions.bodies import (
     cylinder_between,
     mass_properties,
 )
-from opensim_extensions.models.bike.bike import _horn_direction
+from opensim_extensions.models.equipment.bikes.bike.bike import _horn_direction
 
 
 def _forefoot_midpoint_pedal_coordinates_mm(bike, user, side):
@@ -119,6 +119,28 @@ def test_primitive_volumes_and_inertia():
     assert ellipsoid_inertia[0, 0] == pytest.approx(
         ellipsoid_mass * (0.2**2 + 0.3**2) / 5
     )
+
+
+def test_bike_is_equipment_and_exposes_screen_geometry():
+    bike = Bike()
+
+    assert isinstance(bike, Equipment)
+    assert bike.has_screen()
+    assert isinstance(bike.screen, Screen)
+    assert bike.screen.width_mm == pytest.approx(bike.screen_width_mm)
+    assert bike.screen.height_mm == pytest.approx(bike.screen_height_mm)
+    assert bike.screen.base_position_m == pytest.approx(bike._screen_base_m)
+    assert bike.screen.center_position_m == pytest.approx(bike._screen_center_m)
+    assert bike.screen.corners() == pytest.approx(
+        bike.screen.corners(
+            (
+                bike.screen_horizontal_offset_mm,
+                bike.screen_vertical_offset_mm,
+                bike.screen_inclination_deg,
+            )
+        )
+    )
+    assert bike.screen.samples(3).shape == (9, 3)
 
 
 def test_bike_saddle_is_rounded_tapered_and_respects_configured_dimensions():

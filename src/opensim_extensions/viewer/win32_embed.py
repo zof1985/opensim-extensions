@@ -34,7 +34,24 @@ _VTK_WINDOW_ID_PATTERN = re.compile(r"_([0-9a-fA-F]+)_p_void")
 
 
 def hwnd_from_vtk_window_id(window_id: Any) -> int:
-    """Convert ``VTKVisualizer.get_window_id()``'s SWIG pointer encoding to a plain int HWND."""
+    """Decode a VTK SWIG window identifier as a Windows handle.
+
+    Parameters
+    ----------
+    window_id : object
+        SWIG pointer encoding returned by
+        :meth:`~opensim_extensions.viewer.visualizer.VTKVisualizer.get_window_id`.
+
+    Returns
+    -------
+    int
+        Native ``HWND`` parsed from the hexadecimal pointer value.
+
+    Raises
+    ------
+    ValueError
+        If ``window_id`` does not match VTK's expected SWIG encoding.
+    """
     match = _VTK_WINDOW_ID_PATTERN.match(str(window_id))
     if match is None:
         raise ValueError(f"Unrecognized VTK window id format: {window_id!r}")
@@ -73,6 +90,14 @@ if IS_WINDOWS:
         OpenGL rendering: the *top-level* window this used to be had no
         siblings/children for clipping to matter for, so it never needed
         them until now.
+
+        Parameters
+        ----------
+        hwnd : int
+            Native handle of the VTK render window to embed.
+        parent_hwnd : int
+            Native handle of the Tk frame that will contain the render
+            window.
         """
         _user32.ShowWindow(hwnd, _SW_HIDE)
         style = _user32.GetWindowLongPtrW(hwnd, _GWL_STYLE)
@@ -85,6 +110,17 @@ if IS_WINDOWS:
         )
 
     def resize_embedded_window(hwnd: int, width: int, height: int) -> None:
+        """Resize the embedded native render window to fill its Tk frame.
+
+        Parameters
+        ----------
+        hwnd : int
+            Native handle of the embedded VTK render window.
+        width : int
+            Target width in pixels.
+        height : int
+            Target height in pixels.
+        """
         _user32.MoveWindow(hwnd, 0, 0, width, height, True)
 
     def set_process_dpi_aware() -> None:

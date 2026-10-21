@@ -48,16 +48,55 @@ class Coupling:
 
     @property
     def members(self) -> frozenset[str]:
-        """Names of the framework members this coupling involves."""
+        """Return the framework members referenced by this coupling.
+
+        Returns
+        -------
+        frozenset of str
+            Distinct member names referenced by the coupling's component
+            paths.
+        """
         return frozenset(member for member, _ in self.references)
 
     def option(self, key: str, default: Any = None) -> Any:
-        """Return the option stored under ``key``, or ``default``."""
+        """Look up a kind-specific coupling option.
+
+        Parameters
+        ----------
+        key : str
+            Option name to retrieve.
+        default : object, optional
+            Value returned when the option is not present.
+
+        Returns
+        -------
+        object
+            Stored option value, or ``default`` when the key is absent.
+        """
         return dict(self.options).get(key, default)
 
 
 def normalize_reference(reference: Sequence[str]) -> ComponentRef:
-    """Return ``reference`` as a validated ``(member, path)`` tuple."""
+    """Validate and normalize a member/component reference.
+
+    Parameters
+    ----------
+    reference : sequence of str
+        Pair containing a framework member name and an absolute component
+        path within that member.
+
+    Returns
+    -------
+    tuple[str, str]
+        The validated ``(member_name, component_path)`` pair.
+
+    Raises
+    ------
+    TypeError
+        If the reference is not a pair of non-empty strings.
+    ValueError
+        If the component path is not absolute.
+    """
     if (
         isinstance(reference, (str, bytes))
         or len(reference) != 2

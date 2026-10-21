@@ -315,6 +315,19 @@ class Framework(dict[str, opensim.Model]):
 
         As in normal framework insertion, one mutable model instance cannot
         be stored under more than one key.
+
+        Parameters
+        ----------
+        keys : iterable of str
+            Framework names to initialize.
+        value : opensim.Model
+            Model assigned to each name. Since a model cannot be stored under
+            multiple names, ``keys`` may contain at most one distinct item.
+
+        Returns
+        -------
+        Framework
+            New mapping containing the requested model-name pair.
         """
         result = cls()
         for key in keys:
@@ -358,7 +371,30 @@ class Framework(dict[str, opensim.Model]):
         return sorted(set(super().__dir__()) | set(dict.keys(self)))
 
     def pop(self, key: str, *default: Any) -> Any:
-        """Remove and return a named model, optionally returning a default."""
+        """Remove and return a named model.
+
+        Parameters
+        ----------
+        key : str
+            Name of the model to remove.
+        *default : object, optional
+            At most one fallback value. It is returned when ``key`` is absent;
+            without it, a missing key raises ``KeyError``.
+
+        Returns
+        -------
+        opensim.Model or object
+            Removed model, or the supplied fallback if the key was absent.
+
+        Raises
+        ------
+        KeyError
+            If ``key`` is absent and no fallback was supplied.
+        TypeError
+            If more than one fallback is supplied.
+        ValueError
+            If ``key`` is invalid or reserved.
+        """
         name = self._validate_key(key)
         if len(default) > 1:
             raise TypeError(f"pop expected at most 2 arguments, got {len(default) + 1}")
@@ -372,7 +408,18 @@ class Framework(dict[str, opensim.Model]):
             raise
 
     def popitem(self) -> tuple[str, opensim.Model]:
-        """Remove and return the most recently inserted model."""
+        """Remove and return the most recently inserted model.
+
+        Returns
+        -------
+        tuple[str, opensim.Model]
+            Removed ``(name, model)`` pair.
+
+        Raises
+        ------
+        KeyError
+            If the framework is empty.
+        """
         result = dict.popitem(self)
         self._invalidate_snapshot()
         return result
@@ -388,7 +435,14 @@ class Framework(dict[str, opensim.Model]):
         self._invalidate_snapshot()
 
     def copy(self) -> Self:
-        """Return a shallow copy with the same model objects and couplings."""
+        """Create a shallow copy retaining the same OpenSim model objects.
+
+        Returns
+        -------
+        Framework
+            New mapping with the same model instances and a copied coupling
+            registry. Member models themselves are not cloned.
+        """
         result = type(self)(self)
         object.__setattr__(result, "_couplings", dict(self._couplings))
         return result
@@ -419,6 +473,12 @@ class Framework(dict[str, opensim.Model]):
 
         Call :meth:`initSystem` to explicitly rebuild after modifying a member
         model directly; OpenSim does not provide mutation notifications.
+
+        Returns
+        -------
+        opensim.Model
+            Composite model assembled from the framework's members and
+            coupling definitions.
         """
         composite = self._active_composite
         if composite is None:
@@ -433,6 +493,12 @@ class Framework(dict[str, opensim.Model]):
         """Map ``(member_name, member_component_path)`` to composite paths.
 
         The mapping describes the current composite snapshot.
+
+        Returns
+        -------
+        collections.abc.Mapping
+            Read-only mapping from each source member/path pair to its path in
+            the active composite.
         """
         if self._active_composite is None:
             self.initSystem()
@@ -440,7 +506,14 @@ class Framework(dict[str, opensim.Model]):
 
     @property
     def reverse_path_map(self) -> Mapping[str, tuple[str, str]]:
-        """Map composite component paths back to their member and source path."""
+        """Map composite component paths back to their source components.
+
+        Returns
+        -------
+        collections.abc.Mapping
+            Read-only mapping from composite paths to ``(member_name,
+            member_component_path)`` pairs.
+        """
         return MappingProxyType(
             {
                 composite_path: source
@@ -450,14 +523,28 @@ class Framework(dict[str, opensim.Model]):
 
     @property
     def state(self) -> Any:
-        """Return the state associated with the active composite snapshot."""
+        """Return the state associated with the active composite snapshot.
+
+        Returns
+        -------
+        opensim.State
+            State of the combined model, initializing the composite system if
+            it has not yet been created.
+        """
         if self._active_state is None:
             return self.initSystem()
         return self._active_state
 
     @property
     def gravity(self) -> tuple[float, float, float]:
-        """Return the common gravity vector used by the active composite."""
+        """Return the gravity vector of the active composite model.
+
+        Returns
+        -------
+        tuple[float, float, float]
+            World-frame ``(x, y, z)`` acceleration in metres per second
+            squared.
+        """
         vector = self.composite.getGravity()
         return (
             float(vector.get(0)),
@@ -688,7 +775,19 @@ class Framework(dict[str, opensim.Model]):
         return state
 
     def simulate(self, final_time: float) -> Any:
-        """Alias for :meth:`forward`."""
+        """Advance the composite model to an absolute simulation time.
+
+        Parameters
+        ----------
+        final_time : float
+            Target time in seconds, later than the active state's current
+            time.
+
+        Returns
+        -------
+        opensim.State
+            Integrated state at ``final_time``.
+        """
         return self.forward(final_time)
 
     @staticmethod
@@ -715,6 +814,29 @@ class Framework(dict[str, opensim.Model]):
         composite; it does not test whether the system has reached equilibrium.
         OpenSim Manager may fail natively on some muscle-driven models, so test
         with a short duration on the target model first.
+
+        Parameters
+        ----------
+        duration_s : float
+            Positive integration interval in seconds, added to the current
+            state time.
+        accuracy : float, default=1e-4
+            Positive error tolerance passed to the OpenSim integrator.
+        max_step_size_s : float, default=0.01
+            Positive maximum integration step in seconds.
+
+        Returns
+        -------
+        opensim.State
+            State reached at the end of the integration interval.
+
+        Raises
+        ------
+        ValueError
+            If any duration or integrator setting is not positive and finite.
+        RuntimeError
+            If the model contains a free joint unsupported by this integration
+            path.
         """
         values = (duration_s, accuracy, max_step_size_s)
         if any(
@@ -1115,7 +1237,14 @@ class Framework(dict[str, opensim.Model]):
 
     @property
     def couplings(self) -> Mapping[str, Coupling]:
-        """Return the declared couplings by name, in creation order."""
+        """Return the declared couplings in creation order.
+
+        Returns
+        -------
+        collections.abc.Mapping
+            Read-only mapping from coupling names to their immutable
+            :class:`Coupling` definitions.
+        """
         return MappingProxyType(dict(self._couplings))
 
     def couple_weld(
