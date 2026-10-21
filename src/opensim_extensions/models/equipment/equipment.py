@@ -266,6 +266,25 @@ class Equipment(opensim.Model, ABC):
             f"{type(self).__name__} does not implement screen repositioning"
         )
 
+    def expand_screen_offset_limits(
+        self,
+        horizontal_min_mm: float | None = None,
+        vertical_min_mm: float | None = None,
+    ) -> None:
+        """Expand equipment-specific lower bounds for screen offsets.
+
+        Screen-bearing equipment with configurable offset limits should
+        override this method. The default is suitable for equipment whose
+        screen offsets do not have separate lower limits.
+        """
+        if self.screen is not None and (
+            (horizontal_min_mm is not None and self.screen.horizontal_offset_min_mm is not None)
+            or (vertical_min_mm is not None and self.screen.vertical_offset_min_mm is not None)
+        ):
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support expanding screen offset limits"
+            )
+
     def screen_position_constraints(
         self, position: tuple[float, float, float]
     ) -> np.ndarray:

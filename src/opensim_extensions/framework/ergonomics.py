@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import tempfile
+import warnings
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, Self
@@ -38,6 +39,7 @@ _REACH_COORDINATES = (
     "wrist_dev",
 )
 _REACH_FIXED_COORDINATES = ("elbow_flex",)
+OptimizationParameter = float | tuple[float, float] | None
 
 
 class _MeshShape(Shape):
@@ -622,6 +624,34 @@ class VisualErgonomicsFramework(Framework):
             raise ValueError(f"{name} must be a finite increasing range")
         return low, high
 
+    @staticmethod
+    def _parameter_bounds(
+        name: str,
+        value: float | tuple[float, float] | None,
+        current: float,
+        allowed: tuple[float, float],
+    ) -> tuple[float, float]:
+        if value is None:
+            return current, current
+        if isinstance(value, bool):
+            raise TypeError(f"{name} must be None, a float, or a tuple of two floats")
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            low = high = float(value)
+        elif isinstance(value, tuple):
+            low, high = VisualErgonomicsFramework._range(name, value)
+        else:
+            raise TypeError(f"{name} must be None, a float, or a tuple of two floats")
+        if not math.isfinite(low) or not math.isfinite(high):
+            raise ValueError(f"{name} values must be finite")
+        if low < allowed[0] or high > allowed[1]:
+            warnings.warn(
+                f"{name} bounds {(low, high)} exceed the current limits "
+                f"{allowed}; expanding the limits to include them",
+                UserWarning,
+                stacklevel=3,
+            )
+        return low, high
+
     def _clone_models(self) -> tuple[User, Equipment]:
         original_user = self.user
         state = self._user_state()
@@ -719,9 +749,14 @@ class VisualErgonomicsFramework(Framework):
                 math.degrees(coordinate.getRangeMax()),
             )
             if low < allowed[0] or high > allowed[1]:
-                raise ValueError(
-                    f"{name} range {low, high} exceeds model limits {allowed}"
+                warnings.warn(
+                    f"{name} range {(low, high)} exceeds model limits {allowed}; "
+                    "expanding the model limits to include it",
+                    UserWarning,
+                    stacklevel=2,
                 )
+                coordinate.setRangeMin(math.radians(min(low, allowed[0])))
+                coordinate.setRangeMax(math.radians(max(high, allowed[1])))
         return result
 
     def optimize_screen_position(
@@ -736,10 +771,17 @@ class VisualErgonomicsFramework(Framework):
         trunk_flexionextension_range_deg: Sequence[float] | None = None,
         shoulder_flexion_range_deg: Sequence[float] | None = None,
         elbow_flexion_range_deg: Sequence[float] | None = None,
-        screen_incline_range_deg: Sequence[float] = (10.0, 90.0),
+        screen_incline_range_deg: Sequence[float] | None = None,
         screen_horizontal_offset_range_mm: Sequence[float] | None = None,
         screen_vertical_offset_range_mm: Sequence[float] | None = None,
         coordinate_ranges_deg: Mapping[str, Sequence[float]] | None = None,
+        screen_horizontal_offset_mm: float | tuple[float, float] | None = None,
+        screen_vertical_offset_mm: float | tuple[float, float] | None = None,
+        screen_inclination_deg: float | tuple[float, float] | None = None,
+        coordinate_parameters_deg: Mapping[
+            str, OptimizationParameter
+        ]
+        | None = None,
         max_iterations: int = 100,
     ) -> Self | None:
         """Optimize screen position and selected rider coordinates.
@@ -782,22 +824,34 @@ class VisualErgonomicsFramework(Framework):
             Shared bounds for both elbow flexion coordinates, in degrees.
             These bounds affect the fitted rider posture, not the separate
             reachability envelope, which always uses fully extended elbows.
-        screen_incline_range_deg : sequence of float, default=(10, 90)
-            Inclusive bounds for screen inclination in degrees.
+        screen_incline_range_deg : sequence of float or None, optional
+            Legacy inclusive bounds for screen inclination in degrees.
         screen_horizontal_offset_range_mm : sequence of float or None, optional
-            Bounds for the screen's forward offset from its equipment
-            reference point, in millimetres. If omitted, a 200 mm interval
-            around its current value is used, clipped to any configured lower
-            limit.
+            Legacy bounds for the screen's forward offset from its equipment
+            reference point, in millimetres. If omitted, the current value is
+            fixed unless ``screen_horizontal_offset_mm`` is supplied.
         screen_vertical_offset_range_mm : sequence of float or None, optional
-            Bounds for the screen's vertical offset from its equipment
-            reference point, in millimetres. If omitted, a 200 mm interval
-            around its current value is used, clipped to any configured lower
-            limit.
+            Legacy bounds for the screen's vertical offset from its equipment
+            reference point, in millimetres. If omitted, the current value is
+            fixed unless ``screen_vertical_offset_mm`` is supplied.
         coordinate_ranges_deg : mapping of str to sequence of float, optional
-            Additional coordinate-name to ``(minimum, maximum)`` bounds, in
+            Legacy coordinate-name to ``(minimum, maximum)`` bounds, in
             degrees, for user coordinates not covered by the dedicated range
             arguments.
+        screen_horizontal_offset_mm, screen_vertical_offset_mm : float, tuple,
+        or None, optional
+            Screen offset values in millimetres. ``None`` keeps the current
+            value, a float fixes the value, and a tuple sets the inclusive
+            optimization bounds.
+        screen_inclination_deg : float, tuple, or None, optional
+            Screen inclination in degrees. ``None`` keeps the current value,
+            a float fixes the value, and a tuple sets the inclusive
+            optimization bounds.
+        coordinate_parameters_deg : mapping, optional
+            Mapping of user coordinate names to ``None``, a fixed value in
+            degrees, or an inclusive optimization range in degrees. Omitted
+            coordinates remain fixed. Values outside model limits expand the
+            coordinate limits with a warning.
         max_iterations : int, default=100
             Maximum number of iterations for the numerical optimizer.
 
@@ -812,9 +866,8 @@ class VisualErgonomicsFramework(Framework):
         TypeError
             If ``inplace`` is not boolean.
         ValueError
-            If weights are invalid, ranges exceed model limits, screen bounds
-            are invalid, the screen is unavailable, or no feasible position
-            exists.
+            If weights are invalid, parameter values or bounds are invalid,
+            the screen is unavailable, or no feasible position exists.
         """
         weights = np.array(
             [incidence_weight, observed_screen_weight, reachability_weight],
@@ -852,56 +905,105 @@ class VisualErgonomicsFramework(Framework):
             shoulder_flexion_range_deg,
             elbow_flexion_range_deg,
         )
+        for name, value in (coordinate_parameters_deg or {}).items():
+            try:
+                coordinate = target.user.getCoordinateSet().get(name)
+            except RuntimeError as error:
+                raise ValueError(f"unknown user coordinate {name!r}") from error
+            if value is None:
+                coordinate_ranges.pop(name, None)
+                continue
+            current = math.degrees(
+                coordinate.getValue(target._user_state())
+            )
+            allowed = (
+                math.degrees(coordinate.getRangeMin()),
+                math.degrees(coordinate.getRangeMax()),
+            )
+            bounds = target._parameter_bounds(
+                f"coordinate_parameters_deg[{name!r}]",
+                value,
+                current,
+                allowed,
+            )
+            if bounds[0] < allowed[0]:
+                coordinate.setRangeMin(math.radians(bounds[0]))
+            if bounds[1] > allowed[1]:
+                coordinate.setRangeMax(math.radians(bounds[1]))
+            coordinate_ranges[name] = bounds
+
         screen = target.screen
-        screen_ranges = {
-            "screen_horizontal_offset_mm": (
-                screen_horizontal_offset_range_mm
-                if screen_horizontal_offset_range_mm is not None
-                else (
-                    max(
-                        screen.horizontal_offset_min_mm
-                        if screen.horizontal_offset_min_mm is not None
-                        else -math.inf,
-                        screen.horizontal_offset_mm - 100.0,
-                    ),
-                    screen.horizontal_offset_mm + 100.0,
-                )
+        screen_inputs = (
+            (
+                "screen_horizontal_offset_mm",
+                screen_horizontal_offset_mm,
+                screen_horizontal_offset_range_mm,
+                screen.horizontal_offset_mm,
+                screen.horizontal_offset_min_mm,
             ),
-            "screen_vertical_offset_mm": (
-                screen_vertical_offset_range_mm
-                if screen_vertical_offset_range_mm is not None
-                else (
-                    max(
-                        screen.vertical_offset_min_mm
-                        if screen.vertical_offset_min_mm is not None
-                        else -math.inf,
-                        screen.vertical_offset_mm - 100.0,
-                    ),
-                    screen.vertical_offset_mm + 100.0,
-                )
+            (
+                "screen_vertical_offset_mm",
+                screen_vertical_offset_mm,
+                screen_vertical_offset_range_mm,
+                screen.vertical_offset_mm,
+                screen.vertical_offset_min_mm,
             ),
-            "screen_inclination_deg": screen_incline_range_deg,
-        }
-        for name, bounds in screen_ranges.items():
-            screen_ranges[name] = target._range(name, bounds)
-        if (
-            screen.horizontal_offset_min_mm is not None
-            and screen_ranges["screen_horizontal_offset_mm"][0]
-            < screen.horizontal_offset_min_mm
-        ):
-            raise ValueError("screen horizontal offset is below the equipment limit")
-        if (
-            screen.vertical_offset_min_mm is not None
-            and screen_ranges["screen_vertical_offset_mm"][0]
-            < screen.vertical_offset_min_mm
-        ):
-            raise ValueError("screen vertical offset is below the equipment limit")
+            (
+                "screen_inclination_deg",
+                screen_inclination_deg,
+                screen_incline_range_deg,
+                screen.inclination_deg,
+                -math.inf,
+            ),
+        )
+        screen_ranges: dict[str, tuple[float, float]] = {}
+        for name, value, legacy_range, current, minimum in screen_inputs:
+            if value is not None and legacy_range is not None:
+                raise ValueError(
+                    f"specify either {name} or its legacy range, not both"
+                )
+            allowed = (
+                minimum if minimum is not None else -math.inf,
+                math.inf,
+            )
+            if value is not None:
+                bounds = target._parameter_bounds(name, value, current, allowed)
+            elif legacy_range is not None:
+                bounds = target._range(name, legacy_range)
+                if bounds[0] < allowed[0]:
+                    warnings.warn(
+                        f"{name} range {bounds} is below the current limit "
+                        f"{allowed[0]}; expanding the limit to include it",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            else:
+                bounds = (current, current)
+            screen_ranges[name] = bounds
+
+        target.equipment.expand_screen_offset_limits(
+            horizontal_min_mm=(
+                screen_ranges["screen_horizontal_offset_mm"][0]
+                if screen.horizontal_offset_min_mm is not None
+                and screen_ranges["screen_horizontal_offset_mm"][0]
+                < screen.horizontal_offset_min_mm
+                else None
+            ),
+            vertical_min_mm=(
+                screen_ranges["screen_vertical_offset_mm"][0]
+                if screen.vertical_offset_min_mm is not None
+                and screen_ranges["screen_vertical_offset_mm"][0]
+                < screen.vertical_offset_min_mm
+                else None
+            ),
+        )
 
         user = target.user
         state = target._user_state()
         coordinates = user.getCoordinateSet()
         coordinate_state = {
-            name: coordinates.get(name).getValue(state) for name in coordinate_ranges
+            name: math.degrees(coordinates.get(name).getValue(state))
+            for name in coordinate_ranges
         }
         coordinate_bounds: dict[str, tuple[float, float]] = {}
         for name, bounds in coordinate_ranges.items():
@@ -910,12 +1012,11 @@ class VisualErgonomicsFramework(Framework):
                 math.degrees(coordinate.getRangeMin()),
                 math.degrees(coordinate.getRangeMax()),
             )
-            coordinate_bounds[name] = (
-                max(bounds[0], allowed[0]),
-                min(bounds[1], allowed[1]),
-            )
-            if coordinate_bounds[name][0] > coordinate_bounds[name][1]:
-                raise ValueError(f"{name} range does not overlap model limits")
+            if bounds[0] < allowed[0]:
+                coordinate.setRangeMin(math.radians(bounds[0]))
+            if bounds[1] > allowed[1]:
+                coordinate.setRangeMax(math.radians(bounds[1]))
+            coordinate_bounds[name] = bounds
 
         parameter_specs: list[tuple[str, float, float, float]] = []
         screen_values = {
@@ -1021,6 +1122,101 @@ class VisualErgonomicsFramework(Framework):
         if inplace:
             return None
         return target
+
+    def optimize_user_position(
+        self,
+        *,
+        incidence_weight: float = 0.34,
+        observed_screen_weight: float = 0.33,
+        reachability_weight: float = 0.33,
+        inplace: bool = False,
+        lumbar_extension_deg: OptimizationParameter = None,
+        arm_flex_r_deg: OptimizationParameter = None,
+        arm_add_r_deg: OptimizationParameter = None,
+        arm_rot_r_deg: OptimizationParameter = None,
+        elbow_flex_r_deg: OptimizationParameter = None,
+        pro_sup_r_deg: OptimizationParameter = None,
+        wrist_flex_r_deg: OptimizationParameter = None,
+        wrist_dev_r_deg: OptimizationParameter = None,
+        arm_flex_l_deg: OptimizationParameter = None,
+        arm_add_l_deg: OptimizationParameter = None,
+        arm_rot_l_deg: OptimizationParameter = None,
+        elbow_flex_l_deg: OptimizationParameter = None,
+        pro_sup_l_deg: OptimizationParameter = None,
+        wrist_flex_l_deg: OptimizationParameter = None,
+        wrist_dev_l_deg: OptimizationParameter = None,
+        neck_base_flexion_deg: OptimizationParameter = (-30.0, 30.0),
+        neck_base_lateral_flexion_deg: OptimizationParameter = None,
+        neck_lateral_flexion_deg: OptimizationParameter = None,
+        neck_rotation_deg: OptimizationParameter = None,
+        neck_flexion_deg: OptimizationParameter = None,
+        max_iterations: int = 100,
+    ) -> Self | None:
+        """Optimize user joint coordinates while keeping the screen fixed.
+
+        Each upper-body joint coordinate and lumbar flexion/extension are
+        exposed as named arguments. ``None`` keeps its current value, a number
+        fixes it, and a tuple sets its inclusive optimization range. By
+        default only neck-base flexion/extension is optimized over
+        ``(-30, 30)`` degrees.
+
+        Parameters
+        ----------
+        incidence_weight, observed_screen_weight, reachability_weight : float
+            Weights for screen incidence, visual-cone coverage, and hand
+            reachability. They must be in ``[0, 1]`` and sum to one.
+        inplace : bool, default=False
+            If true, modify this framework and return ``None``; otherwise
+            optimize independent model copies and return the new framework.
+        *_deg : float, tuple, or None
+            Named upper-body and lumbar flexion/extension joint coordinates
+            in degrees. ``None`` leaves a coordinate unchanged, a float fixes
+            its value, and a tuple sets its inclusive optimization range.
+            Only ``neck_base_flexion_deg`` is non-None by default.
+        max_iterations : int, default=100
+            Maximum number of iterations for the numerical optimizer.
+
+        Returns
+        -------
+        VisualErgonomicsFramework or None
+            The optimized framework when ``inplace=False``; ``None`` when
+            ``inplace=True``.
+        """
+        coordinate_parameters = {
+            "lumbar_extension": lumbar_extension_deg,
+            "arm_flex_r": arm_flex_r_deg,
+            "arm_add_r": arm_add_r_deg,
+            "arm_rot_r": arm_rot_r_deg,
+            "elbow_flex_r": elbow_flex_r_deg,
+            "pro_sup_r": pro_sup_r_deg,
+            "wrist_flex_r": wrist_flex_r_deg,
+            "wrist_dev_r": wrist_dev_r_deg,
+            "arm_flex_l": arm_flex_l_deg,
+            "arm_add_l": arm_add_l_deg,
+            "arm_rot_l": arm_rot_l_deg,
+            "elbow_flex_l": elbow_flex_l_deg,
+            "pro_sup_l": pro_sup_l_deg,
+            "wrist_flex_l": wrist_flex_l_deg,
+            "wrist_dev_l": wrist_dev_l_deg,
+            "neck_base_flexion": neck_base_flexion_deg,
+            "neck_base_lateral_flexion": neck_base_lateral_flexion_deg,
+            "neck_lateral_flexion": neck_lateral_flexion_deg,
+            "neck_rotation": neck_rotation_deg,
+            "neck_flexion": neck_flexion_deg,
+        }
+        return self.optimize_screen_position(
+            incidence_weight=incidence_weight,
+            observed_screen_weight=observed_screen_weight,
+            reachability_weight=reachability_weight,
+            inplace=inplace,
+            neck_flexionextension_range_deg=None,
+            head_extensionflexion_range_deg=None,
+            trunk_flexionextension_range_deg=None,
+            shoulder_flexion_range_deg=None,
+            elbow_flexion_range_deg=None,
+            coordinate_parameters_deg=coordinate_parameters,
+            max_iterations=max_iterations,
+        )
 
     def _refresh_visualization(self) -> None:
         """Rebuild the visual cone and palm-marker reachability surfaces.

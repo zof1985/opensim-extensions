@@ -1,3 +1,4 @@
+import math
 import sys
 from pathlib import Path
 
@@ -6,7 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from opensim_extensions import Bike, User, VisualErgonomicsFramework
+from opensim_extensions import Bike, User
+from opensim_extensions.framework import VisualErgonomicsFramework
 from opensim_extensions.framework import Framework
 from opensim_extensions.viewer.viewer import _ViewerModel
 from opensim_extensions.viewer.visualizer import VTKVisualizer
@@ -143,6 +145,108 @@ def test_inplace_optimization_modifies_manager_and_returns_none(manager):
     assert result is None
     assert manager.equipment.screen_inclination_deg == pytest.approx(original_screen)
     assert neck.getValue(manager._user_state()) == pytest.approx(np.deg2rad(5.0))
+
+
+def test_screen_pose_parameters_accept_fixed_values(manager):
+    original = manager.equipment.screen
+    horizontal = original.horizontal_offset_mm + 1.0
+    vertical = original.vertical_offset_mm
+    inclination = original.inclination_deg
+
+    optimized = manager.optimize_screen_position(
+        screen_horizontal_offset_mm=horizontal,
+        screen_vertical_offset_mm=vertical,
+        screen_inclination_deg=inclination,
+        neck_flexionextension_range_deg=None,
+        head_extensionflexion_range_deg=None,
+    )
+
+    assert optimized.equipment.screen_horizontal_offset_mm == pytest.approx(horizontal)
+    assert optimized.equipment.screen_vertical_offset_mm == pytest.approx(vertical)
+    assert optimized.equipment.screen_inclination_deg == pytest.approx(inclination)
+    assert manager.equipment.screen_horizontal_offset_mm == pytest.approx(
+        original.horizontal_offset_mm
+    )
+
+
+def test_screen_offset_range_expands_equipment_limit(manager):
+    screen = manager.equipment.screen
+    horizontal_limit = screen.horizontal_offset_min_mm - 0.1
+
+    with pytest.warns(UserWarning, match="expanding the limits"):
+        optimized = manager.optimize_screen_position(
+            screen_horizontal_offset_mm=(
+                horizontal_limit,
+                screen.horizontal_offset_mm,
+            ),
+            neck_flexionextension_range_deg=None,
+            head_extensionflexion_range_deg=None,
+            max_iterations=60,
+        )
+
+    assert optimized.equipment.screen.horizontal_offset_min_mm == pytest.approx(
+        horizontal_limit
+    )
+    assert optimized.equipment.screen_horizontal_offset_mm >= horizontal_limit
+
+
+def test_optimize_user_position_fixes_float_and_expands_coordinate_limits(manager):
+    original_screen = manager.equipment.screen
+    target_degrees = -50.0
+    arm_flexion_degrees = 25.0
+    trunk_flexion_degrees = 10.0
+
+    with pytest.warns(UserWarning, match="expanding the limits"):
+        optimized = manager.optimize_user_position(
+            neck_base_flexion_deg=target_degrees,
+            arm_flex_r_deg=arm_flexion_degrees,
+            lumbar_extension_deg=trunk_flexion_degrees,
+        )
+
+    coordinate = optimized.user.getCoordinateSet().get("neck_base_flexion")
+    value = coordinate.getValue(optimized._user_state())
+    assert value == pytest.approx(np.deg2rad(target_degrees))
+    assert coordinate.getRangeMin() <= np.deg2rad(target_degrees)
+    assert optimized.user.getCoordinateSet().get("arm_flex_r").getValue(
+        optimized._user_state()
+    ) == pytest.approx(np.deg2rad(arm_flexion_degrees))
+    assert optimized.user.getCoordinateSet().get("lumbar_extension").getValue(
+        optimized._user_state()
+    ) == pytest.approx(np.deg2rad(trunk_flexion_degrees))
+    assert optimized.equipment.screen_horizontal_offset_mm == pytest.approx(
+        original_screen.horizontal_offset_mm
+    )
+    assert optimized.equipment.screen_vertical_offset_mm == pytest.approx(
+        original_screen.vertical_offset_mm
+    )
+    assert optimized.equipment.screen_inclination_deg == pytest.approx(
+        original_screen.inclination_deg
+    )
+    assert manager.user.getCoordinateSet().get(
+        "neck_base_flexion"
+    ).getRangeMin() > np.deg2rad(target_degrees)
+
+
+def test_optimize_user_position_defaults_to_neck_range(manager):
+    coordinates = manager.user.getCoordinateSet()
+    original_state = manager._user_state()
+    original_other_coordinate = coordinates.get("neck_rotation").getValue(
+        original_state
+    )
+
+    optimized = manager.optimize_user_position(
+        incidence_weight=1.0,
+        observed_screen_weight=0.0,
+        reachability_weight=0.0,
+        max_iterations=20,
+    )
+
+    neck = optimized.user.getCoordinateSet().get("neck_base_flexion")
+    neck_value_deg = math.degrees(neck.getValue(optimized._user_state()))
+    assert -30.0 <= neck_value_deg <= 30.0
+    assert optimized.user.getCoordinateSet().get("neck_rotation").getValue(
+        optimized._user_state()
+    ) == pytest.approx(original_other_coordinate)
 
 
 def test_optimization_requires_valid_weights(manager):

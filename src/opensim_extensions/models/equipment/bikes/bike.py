@@ -6,7 +6,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from .....bodies import (
+from ....bodies import (
     Box,
     Cylinder,
     Ellipsoid,
@@ -14,8 +14,8 @@ from .....bodies import (
     add_welded_body,
     cylinder_between,
 )
-from ...equipment import Equipment, Screen
-from .....opensim import import_opensim
+from ..equipment import Equipment, Screen
+from ....opensim import import_opensim
 
 __all__ = ["Bike", "IRON_DENSITY_KG_M3"]
 
@@ -24,15 +24,15 @@ opensim = import_opensim()
 IRON_DENSITY_KG_M3 = 7870.0
 _MM = 1e-3
 _SCREEN_THICKNESS_MM = 6.0
-_SCREEN_MOUNT_RADIUS_MM = 6.0
 _SCREEN_COLOR = (0.25, 0.65, 0.8)
 _SCREEN_MOUNT_COLOR = (0.2, 0.2, 0.2)
 _SADDLE_COLOR = (0.12, 0.12, 0.12)
 COMPONENTS = (
     "frame",
     "seat_tube",
+    "seat_slide",
     "seat",
-    "stem",
+    "handlebar_tube",
     "handlebar_slide",
     "handlebar",
     "cranks",
@@ -78,6 +78,33 @@ def _range(name: str, value: Sequence[float]) -> tuple[float, float]:
     if low > high:
         raise ValueError(f"{name} minimum must not exceed its maximum")
     return low, high
+
+
+def _point(name: str, value: Sequence[float]) -> tuple[float, float]:
+    if len(value) != 2:
+        raise ValueError(f"{name} points must be (x, y)")
+    return tuple(_finite(name, v) for v in value)  # type: ignore[return-value]
+
+
+def _point_range(
+    name: str, value: Sequence[Sequence[float]]
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    if len(value) != 2:
+        raise ValueError(f"{name} must be (start, end) points")
+    return _point(name, value[0]), _point(name, value[1])
+
+
+def _polar(angle_deg: float, length_mm: float) -> tuple[float, float]:
+    """Return the (x, y) point at ``length_mm`` from the origin along ``angle_deg``."""
+    angle = math.radians(angle_deg)
+    return length_mm * math.cos(angle), length_mm * math.sin(angle)
+
+
+def _range_angle_deg(value: tuple[tuple[float, float], tuple[float, float]]) -> float:
+    """Directed XY angle from +X of the start-to-end segment (deg)."""
+    return math.degrees(
+        math.atan2(value[1][1] - value[0][1], value[1][0] - value[0][0])
+    )
 
 
 def _steps(name: str, value: int) -> int:
@@ -147,7 +174,6 @@ def _parameter_property(name: str, doc: str):
 
     if name.endswith(("_range_mm",)) or name in {
         "crank_axis_position_mm",
-        "stem_origin_mm",
         "pedal_size_mm",
     }:
         value_type = "tuple[float, ...]"
@@ -187,38 +213,37 @@ class Bike(Equipment):
     direction pointing behind the pedals therefore has an angle greater than
     90 degrees.
 
-    Each adjustable element (seat tube, seat slide, stem, handlebar slide) has
-    a range split in ``steps`` intervals (``steps + 1`` positions); the
+    Each adjustable element (seat tube, seat slide, handlebar tube, handlebar
+    slide) has a range split in ``steps`` intervals (``steps + 1`` positions); the
     ``*_step`` index selects the fixed position (default: the middle one).
     Public coordinate and position properties return millimetres; geometry
     construction and OpenSim calculations use metres internally.
-    The default stem origin and handlebar width are calibrated for
+    The default handlebar tube and handlebar width are calibrated for
     ``fit_user()``'s 170 cm, 70 kg male reference rider in a 45-degree trunk,
     75-degree shoulder and 15-degree elbow pose.
 
     Parameters
     ----------
-    seat_tube_angle_deg
-        Directed angle of the seat tube from the pedal axis, measured from +X
-        counterclockwise about +Z. A seat above and behind the pedal axis has
-        an angle greater than 90 degrees.
     seat_tube_range_mm, seat_tube_steps
-        (min, max) distance of the seat tube top from the pedal axis along
-        the tube, and number of intervals.
+        ``(start, end)`` positions of the seat tube top in world coordinates,
+        each an ``(x, y)`` point in millimetres (z is always 0), and the
+        number of intervals. The tube direction, hence ``seat_tube_angle_deg``
+        (read-only, from +X counterclockwise about +Z; above and behind the
+        pedal axis is greater than 90 degrees), is derived from them.
     crank_axis_position_mm
         (x, y, z) of the pedal axis centre in world coordinates.
     seat_height_mm
         Seat thickness.
-    seat_horizontal_range_mm, seat_horizontal_steps, seat_slide_angle_deg
-        Seat slide range relative to the seat tube top centre, intervals,
-        and direction from +X, counterclockwise about +Z (0 deg points forward).
-    stem_origin_mm
-        (x, y, z) of the handlebar stem base relative to the pedal axis.
-    stem_excursion_mm, stem_steps, stem_angle_deg
-        Stem extension range ``[0, excursion]``, intervals, and stem angle
-        measured from +X, counterclockwise about +Z.
-    handlebar_horizontal_range_mm, handlebar_horizontal_steps, handlebar_slide_angle_deg
-        Same as for the seat, relative to the stem top; 0 deg points along +X.
+    seat_slide_range_mm, seat_slide_steps, seat_slide_angle_deg
+        ``(start, end)`` distances of the seat from the seat tube top centre
+        along the slide direction, intervals, and direction from +X,
+        counterclockwise about +Z (0 deg points forward).
+    handlebar_tube_range_mm, handlebar_tube_steps
+        ``(start, end)`` ``(x, y)`` positions of the handlebar tube top in
+        world coordinates; the tube base is the start point.
+        ``handlebar_tube_angle_deg`` is derived (read-only).
+    handlebar_slide_range_mm, handlebar_slide_steps, handlebar_slide_angle_deg
+        Same as for the seat slide, relative to the handlebar tube top.
     crank_length_mm, pedal_size_mm
         Crank length and pedal (length along x, width along z, height).
     pedal_spacing_mm
@@ -243,86 +268,94 @@ class Bike(Equipment):
         positive roll turns each horn towards the bike centreline.
     densities
         One density for all components, or a mapping per component
-        (``frame``, ``seat_tube``, ``seat``, ``stem``, ``handlebar_slide``,
-        ``handlebar``,
-        ``cranks``, ``pedals``). Defaults to iron.
+        (``frame``, ``seat_tube``, ``seat_slide``, ``seat``,
+        ``handlebar_tube``, ``handlebar_slide``, ``handlebar``, ``cranks``,
+        ``pedals``). Defaults to iron.
     brake_force_n
         Resistive force at each pedal, opposing the crank rotation.
-    tube_diameter_mm, seat_length_mm, seat_width_mm, frame_width_mm, frame_margin_mm
+    frame_tube_diameter_mm, seat_length_mm, seat_width_mm, frame_width_mm, frame_margin_mm
         Remaining dimensions (defaults provided).
     """
 
     def __init__(
         self,
-        seat_tube_angle_deg: float = 104.0,
-        seat_tube_range_mm: Sequence[float] = (250.0, 1200.0),
-        seat_tube_steps: int = 20,
-        crank_axis_position_mm: Sequence[float] = (0.0, 250.0, 100.0),
-        seat_height_mm: float = 50.0,
-        seat_horizontal_range_mm: Sequence[float] = (-100.0, 100.0),
-        seat_horizontal_steps: int = 25,
+        # piantone seduta
+        seat_tube_range_mm: Sequence[Sequence[float]] = ((-150, 800), (-226, 1111)),
+        seat_tube_steps: int = 23,
+        seat_length_mm: float = 260.0,
+        seat_width_mm: float = 140.0,
+        # slitta sella
+        seat_slide_range_mm: Sequence[Sequence[float]] = (0, 150),
+        seat_slide_steps: int = 25,
         seat_slide_angle_deg: float = 0.0,
-        stem_origin_mm: Sequence[float] = (336.0, 372.5, 0.0),
-        stem_excursion_mm: float = 250.0,
-        stem_steps: int = 25,
-        stem_angle_deg: float = 82.0,
-        handlebar_horizontal_range_mm: Sequence[float] = (-100.0, 100.0),
-        handlebar_horizontal_steps: int = 10,
+        # piantone manubrio
+        handlebar_tube_range_mm: Sequence[Sequence[float]] = (
+            (430.0, 970.0),
+            (411.0, 1078.0),
+        ),
+        handlebar_tube_steps: int = 10,
+        # slitta manubrio
+        handlebar_slide_range_mm: Sequence[Sequence[float]] = (0, 120),
+        handlebar_slide_steps: int = 10,
         handlebar_slide_angle_deg: float = 10.0,
-        crank_length_mm: float = 170.0,
-        pedal_size_mm: Sequence[float] = (110.0, 70.0, 25.0),
-        handlebar_diameter_mm: float = 25.0,
-        handlebar_width_mm: float = 337.5,
-        horn_pitch_deg: float = 35.0,
+        # handlebar
+        handlebar_width_mm: float = 450,
+        handlebar_diameter_mm: float = 40.0,
+        # horns
+        horn_pitch_deg: float = 33.0,
         horn_roll_deg: float = 10.0,
-        horn_length_mm: float = 150.0,
+        horn_length_mm: float = 120.0,
+        # screen parameters
+        screen_width_mm: float = 60.0,
+        screen_height_mm: float = 110.0,
+        screen_inclination_deg: float = 40.0,
+        screen_vertical_offset_mm: float = 32.0,
+        screen_horizontal_offset_mm: float = 217.0,
+        # frame
+        frame_tube_diameter_mm: float = 40.0,
+        frame_width_mm: float = 500.0,
+        frame_margin_mm: float = 300.0,
+        # crank and pedal parameters
+        crank_axis_position_mm: Sequence[float] = (0.0, 322.0, 0.0),
+        crank_spacing_mm: float = 170.0,
+        crank_length_mm: float = 172.5,
+        pedal_spacing_mm: float = 185.0,
+        pedal_size_mm: Sequence[float] = (110.0, 70.0, 25.0),
+        seat_height_mm: float = 50.0,
         densities: float | Mapping[str, float] = IRON_DENSITY_KG_M3,
         brake_force_n: float = 0.0,
         *,
         seat_tube_step: int | None = None,
-        seat_horizontal_step: int | None = None,
-        stem_step: int | None = None,
-        handlebar_horizontal_step: int | None = None,
-        tube_diameter_mm: float = 40.0,
-        seat_length_mm: float = 260.0,
-        seat_width_mm: float = 140.0,
-        crank_spacing_mm: float = 170.0,
-        pedal_spacing_mm: float = 185.0,
-        frame_width_mm: float = 500.0,
-        frame_margin_mm: float = 300.0,
-        screen_width_mm: float = 150.0,
-        screen_height_mm: float = 100.0,
-        screen_inclination_deg: float = 105.0,
-        screen_vertical_offset_mm: float = 100.0,
-        screen_horizontal_offset_mm: float = 50.0,
+        seat_slide_step: int | None = None,
+        handlebar_tube_step: int | None = None,
+        handlebar_slide_step: int | None = None,
     ):
         self.opensim = opensim
         self._building = True
-        self._seat_tube_angle_deg = _finite("seat_tube_angle_deg", seat_tube_angle_deg)
-        self._seat_tube_range_mm = _range("seat_tube_range_mm", seat_tube_range_mm)
+        self._seat_tube_range_mm = _point_range(
+            "seat_tube_range_mm", seat_tube_range_mm
+        )
         self._seat_tube_steps = _steps("seat_tube_steps", seat_tube_steps)
         self._crank_axis_position_mm = _vec3(
             "crank_axis_position_mm", crank_axis_position_mm
         )
         self._seat_height_mm = _positive("seat_height_mm", seat_height_mm)
-        self._seat_horizontal_range_mm = _range(
-            "seat_horizontal_range_mm", seat_horizontal_range_mm
-        )
-        self._seat_horizontal_steps = _steps(
-            "seat_horizontal_steps", seat_horizontal_steps
-        )
+        self._seat_slide_range_mm = _range("seat_slide_range_mm", seat_slide_range_mm)
+        self._seat_slide_steps = _steps("seat_slide_steps", seat_slide_steps)
         self._seat_slide_angle_deg = _finite(
             "seat_slide_angle_deg", seat_slide_angle_deg
         )
-        self._stem_origin_mm = _vec3("stem_origin_mm", stem_origin_mm)
-        self._stem_excursion_mm = _positive("stem_excursion_mm", stem_excursion_mm)
-        self._stem_steps = _steps("stem_steps", stem_steps)
-        self._stem_angle_deg = _finite("stem_angle_deg", stem_angle_deg)
-        self._handlebar_horizontal_range_mm = _range(
-            "handlebar_horizontal_range_mm", handlebar_horizontal_range_mm
+        self._handlebar_tube_range_mm = _point_range(
+            "handlebar_tube_range_mm", handlebar_tube_range_mm
         )
-        self._handlebar_horizontal_steps = _steps(
-            "handlebar_horizontal_steps", handlebar_horizontal_steps
+        self._handlebar_tube_steps = _steps(
+            "handlebar_tube_steps", handlebar_tube_steps
+        )
+        self._handlebar_slide_range_mm = _range(
+            "handlebar_slide_range_mm", handlebar_slide_range_mm
+        )
+        self._handlebar_slide_steps = _steps(
+            "handlebar_slide_steps", handlebar_slide_steps
         )
         self._handlebar_slide_angle_deg = _finite(
             "handlebar_slide_angle_deg", handlebar_slide_angle_deg
@@ -337,7 +370,9 @@ class Bike(Equipment):
         self._horn_roll_deg = _finite("horn_roll_deg", horn_roll_deg)
         self._horn_length_mm = _positive("horn_length_mm", horn_length_mm)
         self._brake_force_n = _force("brake_force_n", brake_force_n)
-        self._tube_diameter_mm = _positive("tube_diameter_mm", tube_diameter_mm)
+        self._frame_tube_diameter_mm = _positive(
+            "frame_tube_diameter_mm", frame_tube_diameter_mm
+        )
         self._seat_length_mm = _positive("seat_length_mm", seat_length_mm)
         self._seat_width_mm = _positive("seat_width_mm", seat_width_mm)
         self._crank_spacing_mm = _positive("crank_spacing_mm", crank_spacing_mm)
@@ -355,6 +390,8 @@ class Bike(Equipment):
         self._screen_horizontal_offset_mm = _positive(
             "screen_horizontal_offset_mm", screen_horizontal_offset_mm
         )
+        self._screen_horizontal_offset_min_mm = 1.0
+        self._screen_vertical_offset_min_mm = 1.0
 
         self._densities = {name: IRON_DENSITY_KG_M3 for name in COMPONENTS}
         self._store_densities(densities)
@@ -364,28 +401,32 @@ class Bike(Equipment):
             self._seat_tube_steps // 2 if seat_tube_step is None else seat_tube_step,
             self._seat_tube_steps,
         )
-        self._seat_horizontal_step = _check_step(
-            "seat_horizontal_step",
+        self._seat_slide_step = _check_step(
+            "seat_slide_step",
             (
-                self._seat_horizontal_steps // 2
-                if seat_horizontal_step is None
-                else seat_horizontal_step
+                self._seat_slide_steps // 2
+                if seat_slide_step is None
+                else seat_slide_step
             ),
-            self._seat_horizontal_steps,
+            self._seat_slide_steps,
         )
-        self._stem_step = _check_step(
-            "stem_step",
-            self._stem_steps // 2 if stem_step is None else stem_step,
-            self._stem_steps,
-        )
-        self._handlebar_horizontal_step = _check_step(
-            "handlebar_horizontal_step",
+        self._handlebar_tube_step = _check_step(
+            "handlebar_tube_step",
             (
-                self._handlebar_horizontal_steps // 2
-                if handlebar_horizontal_step is None
-                else handlebar_horizontal_step
+                self._handlebar_tube_steps // 2
+                if handlebar_tube_step is None
+                else handlebar_tube_step
             ),
-            self._handlebar_horizontal_steps,
+            self._handlebar_tube_steps,
+        )
+        self._handlebar_slide_step = _check_step(
+            "handlebar_slide_step",
+            (
+                self._handlebar_slide_steps // 2
+                if handlebar_slide_step is None
+                else handlebar_slide_step
+            ),
+            self._handlebar_slide_steps,
         )
 
         self._angles_deg = {
@@ -417,60 +458,87 @@ class Bike(Equipment):
             self._build()
 
     @staticmethod
-    def _positions(low: float, high: float, steps: int) -> np.ndarray:
-        return np.linspace(low, high, steps + 1)
+    def _positions(start, end, steps: int) -> np.ndarray:
+        return np.linspace(start, end, steps + 1)
+
+    @staticmethod
+    def _xyz(point_mm: Sequence[float]) -> np.ndarray:
+        """Return an (x, y) point in millimetres as an (x, y, 0) array in metres."""
+        return np.array([point_mm[0], point_mm[1], 0.0]) * _MM
+
+    @staticmethod
+    def _along(angle_deg: float, distance_mm: float) -> np.ndarray:
+        """Return the (x, y, 0) vector in metres of a distance along an XY angle."""
+        angle = math.radians(angle_deg)
+        return distance_mm * _MM * np.array([math.cos(angle), math.sin(angle), 0.0])
 
     # --------------------------------------------------------- derived values
     @property
+    def seat_tube_angle_deg(self) -> float:
+        """Direction of the seat tube from +X, counterclockwise about +Z (deg).
+
+        Derived from :attr:`seat_tube_range_mm`.
+        """
+        return _range_angle_deg(self._seat_tube_range_mm)
+
+    @property
+    def handlebar_tube_angle_deg(self) -> float:
+        """Direction of the handlebar tube from +X, counterclockwise about +Z (deg).
+
+        Derived from :attr:`handlebar_tube_range_mm`.
+        """
+        return _range_angle_deg(self._handlebar_tube_range_mm)
+
+    @property
     def seat_tube_positions_mm(self) -> np.ndarray:
-        """Return the discrete seat-tube length settings.
+        """Return the discrete seat-tube top positions.
 
         Returns
         -------
-        numpy.ndarray
-            ``seat_tube_steps + 1`` evenly spaced lengths in millimetres,
-            including both configured endpoints.
+        numpy.ndarray, shape (seat_tube_steps + 1, 2)
+            Evenly spaced ``(x, y)`` world points in millimetres, including
+            both configured endpoints.
         """
         return self._positions(*self._seat_tube_range_mm, self._seat_tube_steps)
 
     @property
-    def seat_horizontal_positions_mm(self) -> np.ndarray:
-        """Return the discrete seat-slide offsets.
+    def seat_slide_positions_mm(self) -> np.ndarray:
+        """Return the discrete seat-slide distances.
 
         Returns
         -------
-        numpy.ndarray
-            ``seat_horizontal_steps + 1`` evenly spaced offsets in
-            millimetres, including both configured endpoints.
+        numpy.ndarray, shape (seat_slide_steps + 1,)
+            Evenly spaced distances in millimetres from the seat tube top along
+            the slide direction, including both configured endpoints.
+        """
+        return self._positions(*self._seat_slide_range_mm, self._seat_slide_steps)
+
+    @property
+    def handlebar_tube_positions_mm(self) -> np.ndarray:
+        """Return the discrete handlebar-tube top positions.
+
+        Returns
+        -------
+        numpy.ndarray, shape (handlebar_tube_steps + 1, 2)
+            Evenly spaced ``(x, y)`` world points in millimetres, including
+            both configured endpoints.
         """
         return self._positions(
-            *self._seat_horizontal_range_mm, self._seat_horizontal_steps
+            *self._handlebar_tube_range_mm, self._handlebar_tube_steps
         )
 
     @property
-    def stem_positions_mm(self) -> np.ndarray:
-        """Return the discrete stem extensions.
+    def handlebar_slide_positions_mm(self) -> np.ndarray:
+        """Return the discrete handlebar-slide distances.
 
         Returns
         -------
-        numpy.ndarray
-            ``stem_steps + 1`` evenly spaced extensions from zero to the
-            configured excursion, in millimetres.
-        """
-        return self._positions(0.0, self._stem_excursion_mm, self._stem_steps)
-
-    @property
-    def handlebar_horizontal_positions_mm(self) -> np.ndarray:
-        """Return the discrete handlebar-slide offsets.
-
-        Returns
-        -------
-        numpy.ndarray
-            ``handlebar_horizontal_steps + 1`` evenly spaced offsets in
-            millimetres, including both configured endpoints.
+        numpy.ndarray, shape (handlebar_slide_steps + 1,)
+            Evenly spaced distances in millimetres from the handlebar tube top
+            along the slide direction, including both configured endpoints.
         """
         return self._positions(
-            *self._handlebar_horizontal_range_mm, self._handlebar_horizontal_steps
+            *self._handlebar_slide_range_mm, self._handlebar_slide_steps
         )
 
     @property
@@ -528,35 +596,24 @@ class Bike(Equipment):
         self.set_pedal_spacing_mm(value)
 
     def _seat_tube_top_at(self, tube_step: int) -> np.ndarray:
-        angle = math.radians(self._seat_tube_angle_deg)
-        length = self.seat_tube_positions_mm[tube_step] * _MM
-        return self._crank_axis_position_m + length * np.array(
-            [math.cos(angle), math.sin(angle), 0.0]
-        )
+        return self._xyz(self.seat_tube_positions_mm[tube_step])
 
     def _seat_position_at(self, tube_step: int, slide_step: int) -> np.ndarray:
-        slide = math.radians(self._seat_slide_angle_deg)
-        offset = self.seat_horizontal_positions_mm[slide_step] * _MM
+        offset = self._along(
+            self._seat_slide_angle_deg, self.seat_slide_positions_mm[slide_step]
+        )
         lift = np.array([0.0, self._seat_height_mm * _MM / 2, 0.0])
-        return (
-            self._seat_tube_top_at(tube_step)
-            + offset * np.array([math.cos(slide), math.sin(slide), 0.0])
-            + lift
-        )
+        return self._seat_tube_top_at(tube_step) + offset + lift
 
-    def _stem_top_at(self, stem_step: int) -> np.ndarray:
-        angle = math.radians(self._stem_angle_deg)
-        length = self.stem_positions_mm[stem_step] * _MM
-        return self._stem_base_m + length * np.array(
-            [math.cos(angle), math.sin(angle), 0.0]
-        )
+    def _handlebar_tube_top_at(self, tube_step: int) -> np.ndarray:
+        return self._xyz(self.handlebar_tube_positions_mm[tube_step])
 
-    def _handlebar_position_at(self, stem_step: int, slide_step: int) -> np.ndarray:
-        slide = math.radians(self._handlebar_slide_angle_deg)
-        offset = self.handlebar_horizontal_positions_mm[slide_step] * _MM
-        return self._stem_top_at(stem_step) + offset * np.array(
-            [math.cos(slide), math.sin(slide), 0.0]
+    def _handlebar_position_at(self, tube_step: int, slide_step: int) -> np.ndarray:
+        offset = self._along(
+            self._handlebar_slide_angle_deg,
+            self.handlebar_slide_positions_mm[slide_step],
         )
+        return self._handlebar_tube_top_at(tube_step) + offset
 
     @property
     def seat_tube_top(self) -> np.ndarray:
@@ -579,36 +636,33 @@ class Bike(Equipment):
             ``(x, y, z)`` seat-centre position in millimetres. The seat is
             centred on the selected seat-slide point.
         """
-        return (
-            self._seat_position_at(self._seat_tube_step, self._seat_horizontal_step)
-            / _MM
-        )
+        return self._seat_position_at(self._seat_tube_step, self._seat_slide_step) / _MM
 
     @property
-    def stem_base(self) -> np.ndarray:
-        """Return the stem base position in world coordinates.
+    def handlebar_tube_base(self) -> np.ndarray:
+        """Return the handlebar tube base position in world coordinates.
 
         Returns
         -------
         numpy.ndarray, shape (3,)
-            ``(x, y, z)`` stem-base position in millimetres.
+            ``(x, y, z)`` handlebar-tube-base position in millimetres.
         """
-        return self._stem_base_m / _MM
+        return self._handlebar_tube_base_m / _MM
 
     @property
-    def _stem_base_m(self) -> np.ndarray:
-        return self._crank_axis_position_m + np.asarray(self._stem_origin_mm) * _MM
+    def _handlebar_tube_base_m(self) -> np.ndarray:
+        return self._xyz(self._handlebar_tube_range_mm[0])
 
     @property
-    def stem_top(self) -> np.ndarray:
-        """Return the selected stem top centre.
+    def handlebar_tube_top(self) -> np.ndarray:
+        """Return the selected handlebar tube top centre.
 
         Returns
         -------
         numpy.ndarray, shape (3,)
             ``(x, y, z)`` position in millimetres in the world frame.
         """
-        return self._stem_top_at(self._stem_step) / _MM
+        return self._handlebar_tube_top_at(self._handlebar_tube_step) / _MM
 
     @property
     def handlebar_position(self) -> np.ndarray:
@@ -624,7 +678,7 @@ class Bike(Equipment):
     @property
     def _handlebar_position_m(self) -> np.ndarray:
         return self._handlebar_position_at(
-            self._stem_step, self._handlebar_horizontal_step
+            self._handlebar_tube_step, self._handlebar_slide_step
         )
 
     @property
@@ -680,8 +734,8 @@ class Bike(Equipment):
             position_anchor_m=tuple(map(float, self._handlebar_position_m)),
             horizontal_offset_mm=self._screen_horizontal_offset_mm,
             vertical_offset_mm=self._screen_vertical_offset_mm,
-            horizontal_offset_min_mm=1.0,
-            vertical_offset_min_mm=1.0,
+            horizontal_offset_min_mm=self._screen_horizontal_offset_min_mm,
+            vertical_offset_min_mm=self._screen_vertical_offset_min_mm,
         )
 
     def set_screen_position(
@@ -701,16 +755,33 @@ class Bike(Equipment):
             Directed angle of the panel's upward direction from ``+x`` toward
             ``+y``, in degrees.
         """
-        self._screen_horizontal_offset_mm = _positive(
+        self._screen_horizontal_offset_mm = _finite(
             "screen_horizontal_offset_mm", horizontal_offset_mm
         )
-        self._screen_vertical_offset_mm = _positive(
+        self._screen_vertical_offset_mm = _finite(
             "screen_vertical_offset_mm", vertical_offset_mm
         )
         self._screen_inclination_deg = _finite(
             "screen_inclination_deg", inclination_deg
         )
         self._apply()
+
+    def expand_screen_offset_limits(
+        self,
+        horizontal_min_mm: float | None = None,
+        vertical_min_mm: float | None = None,
+    ) -> None:
+        """Expand lower screen-offset bounds to include requested values."""
+        if horizontal_min_mm is not None:
+            self._screen_horizontal_offset_min_mm = min(
+                self._screen_horizontal_offset_min_mm,
+                _finite("horizontal_min_mm", horizontal_min_mm),
+            )
+        if vertical_min_mm is not None:
+            self._screen_vertical_offset_min_mm = min(
+                self._screen_vertical_offset_min_mm,
+                _finite("vertical_min_mm", vertical_min_mm),
+            )
 
     def screen_position_constraints(
         self, position: tuple[float, float, float]
@@ -746,7 +817,9 @@ class Bike(Equipment):
             screen settings, and crank/pedal angles.
         """
         parameters: dict[str, Any] = {}
-        for name, parameter in inspect.signature(type(self).__init__).parameters.items():
+        for name, parameter in inspect.signature(
+            type(self).__init__
+        ).parameters.items():
             if name == "self" or parameter.kind is inspect.Parameter.VAR_KEYWORD:
                 continue
             if name == "densities":
@@ -911,33 +984,28 @@ class Bike(Equipment):
         setter.__doc__ = f"Select the ``{name}`` position index and rebuild the model."
         return setter
 
-    set_seat_tube_angle_deg = _make_setter("seat_tube_angle_deg", _finite)
-    set_seat_tube_range_mm = _make_setter("seat_tube_range_mm", _range)
+    set_seat_tube_range_mm = _make_setter("seat_tube_range_mm", _point_range)
     set_seat_tube_steps = _make_steps_setter("seat_tube_steps", "seat_tube_step")
     set_seat_tube_step = _make_step_setter("seat_tube_step", "seat_tube_steps")
     set_crank_axis_position_mm = _make_setter("crank_axis_position_mm", _vec3)
     set_seat_height_mm = _make_setter("seat_height_mm", _positive)
-    set_seat_horizontal_range_mm = _make_setter("seat_horizontal_range_mm", _range)
-    set_seat_horizontal_steps = _make_steps_setter(
-        "seat_horizontal_steps", "seat_horizontal_step"
-    )
-    set_seat_horizontal_step = _make_step_setter(
-        "seat_horizontal_step", "seat_horizontal_steps"
-    )
+    set_seat_slide_range_mm = _make_setter("seat_slide_range_mm", _range)
+    set_seat_slide_steps = _make_steps_setter("seat_slide_steps", "seat_slide_step")
+    set_seat_slide_step = _make_step_setter("seat_slide_step", "seat_slide_steps")
     set_seat_slide_angle_deg = _make_setter("seat_slide_angle_deg", _finite)
-    set_stem_origin_mm = _make_setter("stem_origin_mm", _vec3)
-    set_stem_excursion_mm = _make_setter("stem_excursion_mm", _positive)
-    set_stem_steps = _make_steps_setter("stem_steps", "stem_step")
-    set_stem_step = _make_step_setter("stem_step", "stem_steps")
-    set_stem_angle_deg = _make_setter("stem_angle_deg", _finite)
-    set_handlebar_horizontal_range_mm = _make_setter(
-        "handlebar_horizontal_range_mm", _range
+    set_handlebar_tube_range_mm = _make_setter("handlebar_tube_range_mm", _point_range)
+    set_handlebar_tube_steps = _make_steps_setter(
+        "handlebar_tube_steps", "handlebar_tube_step"
     )
-    set_handlebar_horizontal_steps = _make_steps_setter(
-        "handlebar_horizontal_steps", "handlebar_horizontal_step"
+    set_handlebar_tube_step = _make_step_setter(
+        "handlebar_tube_step", "handlebar_tube_steps"
     )
-    set_handlebar_horizontal_step = _make_step_setter(
-        "handlebar_horizontal_step", "handlebar_horizontal_steps"
+    set_handlebar_slide_range_mm = _make_setter("handlebar_slide_range_mm", _range)
+    set_handlebar_slide_steps = _make_steps_setter(
+        "handlebar_slide_steps", "handlebar_slide_step"
+    )
+    set_handlebar_slide_step = _make_step_setter(
+        "handlebar_slide_step", "handlebar_slide_steps"
     )
     set_handlebar_slide_angle_deg = _make_setter("handlebar_slide_angle_deg", _finite)
     set_crank_length_mm = _make_setter("crank_length_mm", _positive)
@@ -947,7 +1015,7 @@ class Bike(Equipment):
     set_horn_pitch_deg = _make_setter("horn_pitch_deg", _finite)
     set_horn_roll_deg = _make_setter("horn_roll_deg", _finite)
     set_horn_length_mm = _make_setter("horn_length_mm", _positive)
-    set_tube_diameter_mm = _make_setter("tube_diameter_mm", _positive)
+    set_frame_tube_diameter_mm = _make_setter("frame_tube_diameter_mm", _positive)
     set_seat_length_mm = _make_setter("seat_length_mm", _positive)
     set_seat_width_mm = _make_setter("seat_width_mm", _positive)
     set_crank_spacing_mm = _make_setter("crank_spacing_mm", _positive)
@@ -956,9 +1024,9 @@ class Bike(Equipment):
     set_screen_width_mm = _make_setter("screen_width_mm", _positive)
     set_screen_height_mm = _make_setter("screen_height_mm", _positive)
     set_screen_inclination_deg = _make_setter("screen_inclination_deg", _finite)
-    set_screen_vertical_offset_mm = _make_setter("screen_vertical_offset_mm", _positive)
+    set_screen_vertical_offset_mm = _make_setter("screen_vertical_offset_mm", _finite)
     set_screen_horizontal_offset_mm = _make_setter(
-        "screen_horizontal_offset_mm", _positive
+        "screen_horizontal_offset_mm", _finite
     )
     del _make_setter, _make_steps_setter, _make_step_setter
 
@@ -1015,18 +1083,19 @@ class Bike(Equipment):
             opensim.Model.__init__(self)
             self.setName("Bike")
         self._component_masses: dict[str, float] = {}
-        tube_radius = self._tube_diameter_mm * _MM / 2
+        tube_radius = self._frame_tube_diameter_mm * _MM / 2
         axis = self._crank_axis_position_m
-        stem_base, stem_top = self._stem_base_m, self._stem_top_at(self._stem_step)
+        tube_base = self._handlebar_tube_base_m
+        tube_top = self._handlebar_tube_top_at(self._handlebar_tube_step)
         seat_tube_top = self._seat_tube_top_at(self._seat_tube_step)
         margin = self._frame_margin_mm * _MM
         half_width = self._frame_width_mm * _MM / 2
 
         # Frame (world coordinates): rail along x under the pedal axis, rear and
         # front feet, a vertical support to the pedal axis and a strut from the
-        # pedal axis to the stem base.
-        x_min = min(axis[0], stem_base[0], seat_tube_top[0]) - margin
-        x_max = max(axis[0], stem_base[0]) + margin
+        # pedal axis to the handlebar tube base.
+        x_min = min(axis[0], tube_base[0], seat_tube_top[0]) - margin
+        x_max = max(axis[0], tube_base[0]) + margin
         rail_y = tube_radius
         rail_z = axis[2]
         frame = [
@@ -1045,35 +1114,57 @@ class Bike(Equipment):
             ),
             cylinder_between((axis[0], rail_y, rail_z), tuple(axis), tube_radius),
         ]
-        if np.linalg.norm(stem_base - axis) > 1e-9:
-            frame.append(cylinder_between(tuple(axis), tuple(stem_base), tube_radius))
+        if np.linalg.norm(tube_base - axis) > 1e-9:
+            frame.append(cylinder_between(tuple(axis), tuple(tube_base), tube_radius))
         self._add_static("frame", "frame", frame)
         self._add_static(
             "seat_tube",
             "seat_tube",
             [cylinder_between(axis, seat_tube_top, tube_radius)],
         )
-        if np.linalg.norm(stem_top - stem_base) < 1e-3:
+        seat_slide_angle = math.radians(self._seat_slide_angle_deg)
+        seat_slide_low, seat_slide_high = self._seat_slide_range_mm
+        self._add_static(
+            "seat_slide",
+            "seat_slide",
+            [
+                Box(
+                    size=(
+                        max((seat_slide_high - seat_slide_low) * _MM, 1e-3),
+                        tube_radius,
+                        2 * tube_radius,
+                    )
+                )
+            ],
+            location=seat_tube_top
+            + self._along(
+                self._seat_slide_angle_deg,
+                (seat_slide_low + seat_slide_high) / 2,
+            ),
+            orientation=(0.0, 0.0, seat_slide_angle),
+        )
+        if np.linalg.norm(tube_top - tube_base) < 1e-3:
             # Zero excursion: keep a minimal stub so the tube is not degenerate.
-            angle = math.radians(self._stem_angle_deg)
-            stem_base = stem_top - 1e-3 * np.array(
+            angle = math.radians(self.handlebar_tube_angle_deg)
+            tube_base = tube_top - 1e-3 * np.array(
                 [math.cos(angle), math.sin(angle), 0.0]
             )
         self._add_static(
-            "stem", "stem", [cylinder_between(stem_base, stem_top, tube_radius)]
+            "handlebar_tube",
+            "handlebar_tube",
+            [cylinder_between(tube_base, tube_top, tube_radius)],
         )
 
-        # Surface on which the handlebar slides, from the lowest to the highest
-        # offset of the configured range, along the slide direction.
-        offsets = self.handlebar_horizontal_positions_mm * _MM
+        # Surface on which the handlebar slides, between the start and end
+        # distances of the configured range, along the slide direction.
         slide = math.radians(self._handlebar_slide_angle_deg)
-        low, high = float(offsets.min()), float(offsets.max())
+        low, high = self._handlebar_slide_range_mm
         self._add_static(
             "handlebar_slide",
             "handlebar_slide",
-            [Box(size=(max(high - low, 1e-3), tube_radius, 2 * tube_radius))],
-            location=stem_top
-            + (low + high) / 2 * np.array([math.cos(slide), math.sin(slide), 0.0]),
+            [Box(size=(max((high - low) * _MM, 1e-3), tube_radius, 2 * tube_radius))],
+            location=tube_top
+            + self._along(self._handlebar_slide_angle_deg, (low + high) / 2),
             orientation=(0.0, 0.0, slide),
         )
         self._add_static(
@@ -1081,7 +1172,7 @@ class Bike(Equipment):
             "seat",
             self._seat_shapes(),
             location=self._seat_position_at(
-                self._seat_tube_step, self._seat_horizontal_step
+                self._seat_tube_step, self._seat_slide_step
             ),
         )
 
@@ -1104,21 +1195,51 @@ class Bike(Equipment):
         )
         inclination = math.radians(self._screen_inclination_deg)
         panel_rotation = inclination - math.pi / 2
-        mount = cylinder_between(
-            (0.0, 0.0, 0.0),
-            (
+        screen_base = np.array(
+            [
                 self._screen_horizontal_offset_mm * _MM,
                 self._screen_vertical_offset_mm * _MM,
-                0.0,
-            ),
-            _SCREEN_MOUNT_RADIUS_MM * _MM,
+            ]
         )
-        mount.color = _SCREEN_MOUNT_COLOR
+        if abs(math.sin(inclination)) > 1e-8:
+            intersection_x = screen_base[0] - screen_base[1] * math.cos(
+                inclination
+            ) / math.sin(inclination)
+        else:
+            intersection_x = screen_base[0]
+        intersection = np.array([intersection_x, 0.0])
+
+        def support_segment(start: np.ndarray, end: np.ndarray) -> Box:
+            direction = end - start
+            length = float(np.linalg.norm(direction))
+            return Box(
+                center=(
+                    float((start[0] + end[0]) / 2),
+                    float((start[1] + end[1]) / 2),
+                    0.0,
+                ),
+                size=(
+                    max(length, 1e-3),
+                    _SCREEN_THICKNESS_MM * _MM,
+                    self._screen_width_mm * _MM,
+                ),
+                orientation=(
+                    0.0,
+                    0.0,
+                    math.atan2(float(direction[1]), float(direction[0])),
+                ),
+                color=_SCREEN_MOUNT_COLOR,
+            )
+
+        mount_shapes = [
+            support_segment(np.zeros(2), intersection),
+            support_segment(intersection, screen_base),
+        ]
         self._add_static(
             "handlebar",
             "screen_mount",
-            [mount],
-            location=self._handlebar_position_m,
+            mount_shapes,
+            parent=self.getBodySet().get("handlebar"),
         )
         screen_mount = self.getBodySet().get("screen_mount")
         self._add_static(
@@ -1155,7 +1276,7 @@ class Bike(Equipment):
     def fit_user(
         self,
         user: Any | None = None,
-        shoe_height_cm: float = 3.0,
+        shoe_height_mm: float = 30.0,
         trunk_angle_deg: float | None = 45.0,
         shoulder_flexion_deg: float = 75.0,
         elbow_flexion_deg: float = 15.0,
@@ -1163,20 +1284,20 @@ class Bike(Equipment):
     ):
         """Fit ``user`` on the bike and return a :class:`~opensim_extensions.Framework`.
 
-        The bike is adjusted in place (seat tube, seat slide, stem and handlebar
+        The bike is adjusted in place (seat tube, seat slide, handlebar tube and
         slide steps, crank and pedal angles) and the user is posed on it; the
         returned framework contains ``user`` and ``bike`` with both feet welded
         to their pedals. If ``user`` is omitted, the 170 cm, 70 kg male
         reference user is fitted. See
-        :func:`opensim_extensions.models.equipment.bikes.bike.fitting.fit_user` for the full
+        :func:`opensim_extensions.models.equipment.bikes.fitting.fit_user` for the full
         procedure.
 
         Parameters
         ----------
         user : User or None, default=None
             The user to place on the bike; omitted uses the reference rider.
-        shoe_height_cm
-            Shoe sole height, added to the user's crotch height.
+        shoe_height_mm
+            Shoe sole height in millimetres, added to the user's crotch height.
         trunk_angle_deg
             Forward trunk inclination from the vertical in degrees, positive
             towards +X. ``None`` uses the user's current trunk posture as the
@@ -1195,7 +1316,7 @@ class Bike(Equipment):
         return fit_user(
             self,
             user,
-            shoe_height_cm,
+            shoe_height_mm,
             trunk_angle_deg,
             shoulder_flexion_deg,
             elbow_flexion_deg,
@@ -1270,24 +1391,21 @@ class Bike(Equipment):
 
 
 _PARAMETER_DOCS = {
-    "seat_tube_angle_deg": "Directed angle from +X to the seat tube, about +Z (deg).",
-    "seat_tube_range_mm": "(min, max) seat tube length from the pedal axis (mm).",
+    "seat_tube_range_mm": "((x, y) start, (x, y) end) seat tube top positions, world frame (mm).",
     "seat_tube_steps": "Number of seat-tube intervals; N intervals give N+1 positions.",
     "seat_tube_step": "Selected seat-tube position index in 0..seat_tube_steps.",
     "crank_axis_position_mm": "Pedal axis centre (x, y, z) in world coordinates (mm).",
     "seat_height_mm": "Seat thickness (mm).",
-    "seat_horizontal_range_mm": "Seat slide range relative to the seat tube top (mm).",
-    "seat_horizontal_steps": "Intervals of the seat slide range.",
-    "seat_horizontal_step": "Selected seat slide index.",
+    "seat_slide_range_mm": "(start, end) seat distance from the seat tube top along the slide direction (mm).",
+    "seat_slide_steps": "Intervals of the seat slide range.",
+    "seat_slide_step": "Selected seat slide index.",
     "seat_slide_angle_deg": "Seat slide direction from +X, counterclockwise about +Z (deg).",
-    "stem_origin_mm": "Stem base (x, y, z) relative to the pedal axis (mm).",
-    "stem_excursion_mm": "Stem extension range [0, excursion] (mm).",
-    "stem_steps": "Intervals of the stem extension.",
-    "stem_step": "Selected stem extension index.",
-    "stem_angle_deg": "Directed angle from +X to the stem, counterclockwise about +Z (deg).",
-    "handlebar_horizontal_range_mm": "Handlebar slide range relative to the stem top (mm).",
-    "handlebar_horizontal_steps": "Intervals of the handlebar slide range.",
-    "handlebar_horizontal_step": "Selected handlebar slide index.",
+    "handlebar_tube_range_mm": "((x, y) start, (x, y) end) handlebar tube top positions, world frame; start is the tube base (mm).",
+    "handlebar_tube_steps": "Intervals of the handlebar tube extension.",
+    "handlebar_tube_step": "Selected handlebar tube extension index.",
+    "handlebar_slide_range_mm": "(start, end) handlebar distance from the handlebar tube top along the slide direction (mm).",
+    "handlebar_slide_steps": "Intervals of the handlebar slide range.",
+    "handlebar_slide_step": "Selected handlebar slide index.",
     "handlebar_slide_angle_deg": "Handlebar slide direction from +X, counterclockwise about +Z (deg).",
     "crank_length_mm": "Crank length (mm).",
     "pedal_size_mm": "Pedal (length, width, height) (mm).",
@@ -1297,12 +1415,12 @@ _PARAMETER_DOCS = {
     "horn_roll_deg": "Horn roll; positive angles turn both horns medially (deg).",
     "horn_length_mm": "Length of each horn (mm).",
     "brake_force_n": "Brake force at each pedal (N).",
-    "tube_diameter_mm": "Diameter of the frame and seat/stem tubes (mm).",
+    "frame_tube_diameter_mm": "Diameter of the frame and seat/handlebar tubes (mm).",
     "seat_length_mm": "Seat length along x (mm).",
     "seat_width_mm": "Seat width along z (mm).",
     "crank_spacing_mm": "Distance between the two crank centres (mm).",
     "frame_width_mm": "Width of the ground frame feet (mm).",
-    "frame_margin_mm": "Frame overhang beyond the pedal axis and stem (mm).",
+    "frame_margin_mm": "Frame overhang beyond the pedal axis and handlebar tube (mm).",
     "screen_width_mm": "Screen width across the handlebar (mm).",
     "screen_height_mm": "Screen height along the panel (mm).",
     "screen_inclination_deg": "Directed angle from +X to the screen's upward direction, about +Z (deg).",

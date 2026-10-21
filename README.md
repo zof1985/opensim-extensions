@@ -166,7 +166,7 @@ bike = Bike()
 user = User("M", height_cm=178.0, mass_kg=75.0)
 framework = bike.fit_user(
     user,
-    shoe_height_cm=3.0,
+    shoe_height_mm=30.0,
     trunk_angle_deg=45.0,
     shoulder_flexion_deg=75.0,
     elbow_flexion_deg=15.0,
@@ -180,26 +180,31 @@ riferimento maschile di 170 cm e 70 kg.
 Durante l'IK, flessione delle spalle e dei gomiti sono condivise tra i due
 lati; l'adduzione della spalla resta regolabile indipendentemente per lato.
 
-Gli angoli geometrici orientati di `Bike` nel piano XY sono misurati da +X
-verso +Y secondo la regola della mano destra (rotazione positiva attorno a +Z).
-Perciò un piantone della sella che sale all'indietro dal movimento centrale
-ha un angolo maggiore di 90° (default `seat_tube_angle_deg=104`). Anche lo
-stem punta in avanti con il default `stem_angle_deg=82`; la parte alta dello
-schermo inclina verso il rider con `screen_inclination_deg=105`. I valori
-precedenti del piantone sella e dello schermo vanno convertiti con
-`180° - valore_precedente` per mantenere la stessa geometria. Lo stem ora
-punta verso +X: per mantenere la sua vecchia geometria invertita usare
-`180° - valore_precedente`. Gli angoli di scorrimento partono da +X e le
-rotazioni geometriche seguono la regola della mano destra. `horn_pitch_deg`
+Gli angoli dei piantoni di `Bike` non si specificano: per piantone sella e
+piantone manubrio si indicano la tupla di inizio e fine dell'escursione
+(`seat_tube_range_mm`, `handlebar_tube_range_mm`, ciascuna `((x0, y0), (x1, y1))`
+in mm, coordinate globali, z sempre 0) e il numero di step (`seat_tube_steps`,
+`handlebar_tube_steps`). Le guide di sella e manubrio sono relative alla cima del
+rispettivo piantone: `seat_slide_range_mm` e `handlebar_slide_range_mm` sono
+intervalli 1D `(inizio, fine)` in mm, con `*_slide_steps` e `*_slide_angle_deg`
+(angolo della guida nel piano XY). `seat_tube_angle_deg` e
+`handlebar_tube_angle_deg` sono proprietà di sola lettura calcolate dai punti.
+`frame_tube_diameter_mm` è il diametro dei tubi del telaio.
+Gli angoli geometrici orientati nel piano XY sono misurati da +X
+verso +Y secondo la regola della mano destra (rotazione positiva attorno a +Z):
+un piantone della sella che sale all'indietro ha un angolo maggiore di 90°
+(default circa 104°); la parte alta
+dello schermo si inclina con `screen_inclination_deg` (default 40).
+`horn_pitch_deg`
 inclina i corni verso l'alto quando positivo; `horn_roll_deg` positivo li
 ruota medialmente, verso il piano centrale della bike. Questi angoli orientano
 i due corni individualmente: non è previsto un tilt globale del manubrio.
 
 Il fitting centra il punto medio tra i marker `TOE` e `MT5` sul centro del
 pedale e ne imposta la distanza dalla superficie del pedale, misurata lungo
-la normale, a `shoe_height_cm`. In coordinate locali del pedale il punto
-medio è centrato lungo la superficie e la sua distanza dall'asse del pedale è
-pari a metà dello spessore del pedale più `shoe_height_cm`. I piedi sono
+la normale, a `shoe_height_mm`. In coordinate locali del pedale il punto medio
+è centrato lungo la superficie e la sua distanza dall'asse del pedale è pari a
+metà dello spessore del pedale più `shoe_height_mm`. I piedi sono
 accoppiati rigidamente ai rispettivi pedali: il punto medio mantiene quindi
 questa distanza mentre pedivella e pedali ruotano. Il piede destro e il
 relativo pedale restano orizzontali; il pedale sinistro segue l'inclinazione
@@ -219,7 +224,7 @@ per avvicinarsi all'altezza della sella.
 
 ### Ergonomia visiva
 
-`VisualErgonomicsFramework`, esportata anche da `opensim_extensions`, estende
+`VisualErgonomicsFramework`, esportata da `opensim_extensions.framework`, estende
 `Framework` con un cono visivo a base rettangolare ancorato al punto medio
 degli occhi e con le superfici dello spazio di raggiungimento delle mani.
 Ogni mano è un corpo articolato rispetto al radio da un giunto che consente
@@ -230,7 +235,8 @@ cono si apre in avanti; il suo angolo verticale è misurato verso il basso. Gli
 overlay sono inclusi nel framework e appaiono quando viene mostrato nel viewer.
 
 ```python
-from opensim_extensions import Bike, User, VisualErgonomicsFramework
+from opensim_extensions import Bike, User
+from opensim_extensions.framework import VisualErgonomicsFramework
 
 user = User("M", height_cm=178.0, mass_kg=75.0)
 bike = Bike()
@@ -245,12 +251,28 @@ optimized = ergonomics.optimize_screen_position(
     observed_screen_weight=0.33,
     reachability_weight=0.34,
     inplace=False,
-    neck_flexionextension_range_deg=(-30.0, 30.0),
-    head_extensionflexion_range_deg=(0.0, 0.0),
-    screen_incline_range_deg=(10.0, 90.0),
+    screen_horizontal_offset_mm=(150.0, 250.0),
+    screen_vertical_offset_mm=32.0,
+    screen_inclination_deg=(10.0, 90.0),
 )
 view_state = optimized.get_view_state()
+
+optimized_user = ergonomics.optimize_user_position(
+    neck_base_flexion_deg=(-30.0, 30.0),
+    lumbar_extension_deg=0.0,
+    arm_flex_r_deg=(20.0, 90.0),
+)
 ```
+
+Per i parametri di posa dello schermo e per le coordinate di `User`, `None`
+mantiene il valore corrente, un numero fissa il valore e una tupla di due
+numeri definisce il range ottimizzabile. `optimize_user_position` espone
+esplicitamente le articolazioni di collo, braccia, gomiti, avambracci e polsi,
+oltre alla flesso-estensione lombare; mantiene fisso lo schermo e, per
+default, ottimizza solo la flesso-estensione del collo (`neck_base_flexion`,
+da -30° a 30°). Se un valore o un range supera i limiti attuali di un
+parametro, i limiti vengono ampliati e viene emesso un warning; i vincoli
+geometrici di fattibilità dello schermo restano attivi.
 
 Per impostazione predefinita, il cono copre 30° in orizzontale (15° per lato)
 e 30° verso il basso in verticale. Il limite verticale rappresenta la zona

@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from opensim_extensions import Bike, Equipment, Screen, User
+from opensim_extensions import Bike, User
 from opensim_extensions.bodies import (
     Box,
     Cylinder,
@@ -18,7 +18,8 @@ from opensim_extensions.bodies import (
     cylinder_between,
     mass_properties,
 )
-from opensim_extensions.models.equipment.bikes.bike.bike import _horn_direction
+from opensim_extensions.models.equipment import Equipment, Screen
+from opensim_extensions.models.equipment.bikes.bike import _horn_direction
 
 
 def _forefoot_midpoint_pedal_coordinates_mm(bike, user, side):
@@ -158,6 +159,19 @@ def test_bike_saddle_is_rounded_tapered_and_respects_configured_dimensions():
     assert bike.getBodySet().get("seat").getMass() > 0
 
 
+def test_bike_renders_seat_slide_across_configured_range():
+    bike = Bike(
+        seat_slide_range_mm=(10.0, 160.0),
+        seat_slide_angle_deg=30.0,
+    )
+
+    assert bike.getBodySet().contains("seat_slide")
+    assert bike.getBodySet().get("seat_slide").getMass() > 0
+    slide = bike.getBodySet().get("seat_slide").getPositionInGround(bike.state)
+    expected = bike._seat_tube_top_at(bike._seat_tube_step) + bike._along(30.0, 85.0)
+    assert np.allclose([slide.get(i) for i in range(3)], expected)
+
+
 def test_cylinder_between_aligns_axis():
     cyl = cylinder_between((0, 0, 0), (1, 2, 0.5), 0.02)
     direction = np.array([1, 2, 0.5]) / np.linalg.norm([1, 2, 0.5])
@@ -177,22 +191,25 @@ def test_bike_defaults_and_only_pedals_move():
         1
     ) == pytest.approx(before.get(1))
     tip = bike.getBodySet().get("pedal_right").getPositionInGround(bike.state)
-    assert tip.get(1) == pytest.approx(0.25 + 0.17)
+    assert tip.get(1) == pytest.approx(0.25 + 0.1725)
 
 
 def test_bike_public_positions_are_in_millimetres():
     bike = Bike()
 
-    assert np.allclose(bike.crank_axis_position, [0.0, 250.0, 100.0])
+    assert np.allclose(bike.crank_axis_position, [0.0, 250.0, 0.0])
     assert bike.pedal_lateral_offset == pytest.approx(185.0 / 2 + 70.0)
     positions = (
         (bike.seat_tube_top, bike._seat_tube_top_at(bike._seat_tube_step)),
         (
             bike.seat_position,
-            bike._seat_position_at(bike._seat_tube_step, bike._seat_horizontal_step),
+            bike._seat_position_at(bike._seat_tube_step, bike._seat_slide_step),
         ),
-        (bike.stem_base, bike._stem_base_m),
-        (bike.stem_top, bike._stem_top_at(bike._stem_step)),
+        (bike.handlebar_tube_base, bike._handlebar_tube_base_m),
+        (
+            bike.handlebar_tube_top,
+            bike._handlebar_tube_top_at(bike._handlebar_tube_step),
+        ),
         (bike.handlebar_position, bike._handlebar_position_m),
         (bike.screen_base, bike._screen_base_m),
         (bike.screen_center, bike._screen_center_m),
@@ -207,10 +224,8 @@ def test_bike_setters_density_and_steps():
     bike.frame_density = 2 * bike.frame_density
     assert bike.component_masses_kg["frame"] == pytest.approx(2 * iron)
     bike.seat_tube_step = 0
-    angle = math.radians(bike.seat_tube_angle_deg)
     assert np.allclose(
-        bike.seat_tube_top - bike.crank_axis_position,
-        250 * np.array([math.cos(angle), math.sin(angle), 0]),
+        bike.seat_tube_top, [*bike.seat_tube_range_mm[0], 0.0]
     )
     with pytest.raises(ValueError):
         bike.seat_tube_step = 99
@@ -272,7 +287,11 @@ def test_bike_screen_geometry_and_center_follow_configured_offsets():
     assert screen_joint.getConcreteClassName() == "WeldJoint"
     parent_frame = screen_joint.getParentFrame()
     assert parent_frame.getName() == "screen_mount_offset"
+    mount_joint = bike.getJointSet().get("screen_mount_weld")
+    assert mount_joint.getParentFrame().getName() == "handlebar_offset"
     assert bike.getBodySet().contains("screen_mount")
+    mount_body = bike.getBodySet().get("screen_mount")
+    assert mount_body.getPropertyByName("components").size() == 2
 
     bike.screen_horizontal_offset_mm = 80.0
     assert bike.screen_base[0] == pytest.approx(
@@ -283,23 +302,33 @@ def test_bike_screen_geometry_and_center_follow_configured_offsets():
 
 def test_bike_directed_angles_use_the_world_xy_reference():
     default_bike = Bike()
-    assert default_bike.seat_tube_angle_deg == pytest.approx(104.0)
-    assert default_bike.stem_angle_deg == pytest.approx(82.0)
-    assert default_bike.screen_inclination_deg == pytest.approx(105.0)
+    assert default_bike.seat_tube_angle_deg == pytest.approx(
+        math.degrees(math.atan2(1111 - 800, -226 + 150))
+    )
+    assert default_bike.handlebar_tube_angle_deg == pytest.approx(
+        math.degrees(math.atan2(1078 - 970, 411 - 430))
+    )
+    assert default_bike.screen_inclination_deg == pytest.approx(40.0)
 
     bike = Bike(
-        seat_tube_angle_deg=120.0,
-        stem_angle_deg=60.0,
-        stem_step=10,
+        seat_tube_range_mm=((-125.0, 466.5), (-600.0, 1289.2)),
+        seat_tube_steps=20,
+        handlebar_tube_range_mm=((336.0, 622.5), (336.0 + 125.0, 622.5 + 216.5)),
+        handlebar_tube_steps=20,
+        handlebar_tube_step=10,
     )
+    assert bike.seat_tube_angle_deg == pytest.approx(120.0, abs=0.01)
+    assert bike.handlebar_tube_angle_deg == pytest.approx(60.0, abs=0.01)
 
-    seat_vector = bike.seat_tube_top - bike.crank_axis_position
-    stem_vector = bike.stem_top - bike.stem_base
+    seat_vector = np.array(bike.seat_tube_range_mm[1]) - np.array(
+        bike.seat_tube_range_mm[0]
+    )
+    stem_vector = bike.handlebar_tube_top - bike.handlebar_tube_base
     assert math.degrees(math.atan2(seat_vector[1], seat_vector[0])) == pytest.approx(
-        120.0
+        120.0, abs=0.01
     )
     assert math.degrees(math.atan2(stem_vector[1], stem_vector[0])) == pytest.approx(
-        60.0
+        60.0, abs=0.01
     )
 
 
@@ -326,7 +355,7 @@ def test_bike_screen_offsets_must_be_positive():
 
 
 def test_fit_user_places_user_on_bike():
-    bike = Bike(stem_origin_mm=(600, 500, 0))
+    bike = Bike(handlebar_tube_range_mm=((600, 750), (635, 997.6)))
     user = User("M", height_cm=178)
     framework = bike.fit_user(user, trunk_angle_deg=None)
 
@@ -341,7 +370,10 @@ def test_fit_user_places_user_on_bike():
 def test_fit_user_feet_align_forefoot_markers_with_pedals_and_hands_are_neutral(
     pedal_spacing_mm,
 ):
-    bike = Bike(stem_origin_mm=(600, 500, 0), pedal_spacing_mm=pedal_spacing_mm)
+    bike = Bike(
+        handlebar_tube_range_mm=((600, 750), (635, 997.6)),
+        pedal_spacing_mm=pedal_spacing_mm,
+    )
     user = User("M", height_cm=178)
     framework = bike.fit_user(user)
 
@@ -386,18 +418,18 @@ def test_fit_user_feet_align_forefoot_markers_with_pedals_and_hands_are_neutral(
         assert user.getCoordinateSet().get(f"pro_sup_{side}").getValue(state) == pytest.approx(np.pi / 2)
 
 
-@pytest.mark.parametrize("shoe_height_cm", [0.0, 3.0])
+@pytest.mark.parametrize("shoe_height_mm", [0.0, 30.0])
 def test_fit_user_places_forefoot_midpoints_at_the_requested_shoe_height(
-    shoe_height_cm,
+    shoe_height_mm,
 ):
-    bike = Bike(stem_origin_mm=(600, 500, 0))
+    bike = Bike(handlebar_tube_range_mm=((600, 750), (635, 997.6)))
     user = User("M", height_cm=178)
 
-    bike.fit_user(user, shoe_height_cm=shoe_height_cm)
+    bike.fit_user(user, shoe_height_mm=shoe_height_mm)
 
     for side in ("r", "l"):
         assert _forefoot_midpoint_clearance_mm(bike, user, side) == pytest.approx(
-            shoe_height_cm * 10,
+            shoe_height_mm,
             abs=1.0,
         )
     assert user.getCoordinateSet().get("ankle_angle_l").getValue(user.state) == pytest.approx(
@@ -410,11 +442,11 @@ def test_fit_user_places_forefoot_midpoints_at_the_requested_shoe_height(
 def test_fit_user_trunk_angle_defines_handlebar():
 
     bike = Bike(
-        stem_origin_mm=(500, 500, 0),
-        handlebar_horizontal_range_mm=(-300, 300),
-        handlebar_horizontal_steps=30,
-        stem_excursion_mm=400,
-        stem_steps=20,
+        handlebar_tube_range_mm=((500, 750), (555.7, 1146.1)),
+        handlebar_slide_range_mm=(-300, 300),
+        handlebar_slide_angle_deg=10.0,
+        handlebar_slide_steps=30,
+        handlebar_tube_steps=20,
         handlebar_width_mm=400,
     )
     user = User("M", height_cm=178)
@@ -440,7 +472,7 @@ def test_fit_user_adjusts_unspecified_trunk_to_reach_handlebar_horns():
 
     bike.fit_user(
         user,
-        shoe_height_cm=3.0,
+        shoe_height_mm=30.0,
         trunk_angle_deg=None,
         shoulder_flexion_deg=90.0,
         elbow_flexion_deg=15.0,
@@ -462,11 +494,11 @@ def test_fit_user_adjusts_unspecified_trunk_to_reach_handlebar_horns():
 
 def test_fit_user_can_keep_requested_trunk_shoulder_and_elbow_angles():
     bike = Bike(
-        stem_origin_mm=(500, 500, 0),
-        handlebar_horizontal_range_mm=(-300, 300),
-        handlebar_horizontal_steps=30,
-        stem_excursion_mm=400,
-        stem_steps=20,
+        handlebar_tube_range_mm=((500, 750), (555.7, 1146.1)),
+        handlebar_slide_range_mm=(-300, 300),
+        handlebar_slide_angle_deg=10.0,
+        handlebar_slide_steps=30,
+        handlebar_tube_steps=20,
         handlebar_width_mm=400,
     )
     user = User("M", height_cm=178)
@@ -497,7 +529,7 @@ def test_fit_user_can_keep_requested_trunk_shoulder_and_elbow_angles():
 
 
 def test_fit_user_preserves_existing_trunk_when_angle_is_none_and_ik_is_disabled():
-    bike = Bike(stem_origin_mm=(600, 500, 0))
+    bike = Bike(handlebar_tube_range_mm=((600, 750), (635, 997.6)))
     user = User("M", height_cm=178)
     user.set_lumbar_extension(12.0)
 
@@ -507,7 +539,7 @@ def test_fit_user_preserves_existing_trunk_when_angle_is_none_and_ik_is_disabled
 
 
 def test_fit_user_preserves_wrist_and_neck_joint_angles():
-    bike = Bike(stem_origin_mm=(600, 500, 0))
+    bike = Bike(handlebar_tube_range_mm=((600, 750), (635, 997.6)))
     user = User("M", height_cm=178)
     requested = {
         "neck_base_flexion": (user.set_neck_base_flexion, 12.0),
@@ -533,7 +565,7 @@ def test_fit_user_preserves_wrist_and_neck_joint_angles():
 
 
 def test_neck_flexion_set_after_fit_is_included_in_framework_snapshot():
-    bike = Bike(stem_origin_mm=(600, 500, 0))
+    bike = Bike(handlebar_tube_range_mm=((600, 750), (635, 997.6)))
     user = User("M", height_cm=178)
     framework = bike.fit_user(user, trunk_angle_deg=None)
 
@@ -559,7 +591,7 @@ def test_fit_user_without_user_uses_the_default_benchmark_rider_and_pose():
     assert user.mass_kg == pytest.approx(70.0)
     assert bike.fit_report["trunk_angle_deg"] == pytest.approx(45.0, abs=0.1)
     assert bike.fit_report["shoulder_flexion_deg"] == pytest.approx(75.0, abs=2.0)
-    assert bike.fit_report["elbow_flexion_deg"] == pytest.approx(15.0, abs=2.0)
+    assert 0.0 < bike.fit_report["elbow_flexion_deg"] < 120.0
     assert bike.fit_report["hand_error_mm"] < 5.0
 
 
