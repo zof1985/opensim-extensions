@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from ..animation import save_animation as _render_animation
 from ..bodies.shapes import MESHES_DIR
@@ -48,6 +51,20 @@ class _ViewerModel:
         return resolve_geometry_file(
             self.opensim, self.model, filename, self._geometry_dirs
         )
+
+
+def _camera_vector(
+    name: str, value: tuple[float, float, float] | None
+) -> tuple[float, float, float] | None:
+    if value is None:
+        return None
+    try:
+        vector = tuple(float(component) for component in value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must contain three finite numbers") from error
+    if len(vector) != 3 or not all(math.isfinite(component) for component in vector):
+        raise ValueError(f"{name} must contain three finite numbers")
+    return vector
 
 
 class VTKViewer:
@@ -123,6 +140,15 @@ class VTKViewer:
         motion: Any = None,
         size: tuple[int, int] = DEFAULT_SIZE,
         dpi: int = 300,
+        camera_position: tuple[float, float, float] | None = None,
+        camera_focal_point: tuple[float, float, float] | None = None,
+        camera_view_up: tuple[float, float, float] | None = None,
+        show_ground: bool = True,
+        show_muscles: bool = True,
+        show_markers: bool = True,
+        show_axes: bool = True,
+        show_reachability: bool = True,
+        show_vision_cone: bool = True,
     ) -> Path:
         """Save the posed model as an SVG or PNG image, without opening a window.
 
@@ -144,6 +170,27 @@ class VTKViewer:
             Render size in pixels; sets PNG dimensions and SVG layout.
         dpi : int, default=300
             Resolution metadata for PNG output. Ignored for SVG output.
+        camera_position : tuple of float or None, default=None
+            Camera position ``(x, y, z)`` in ground-frame metres. ``None``
+            uses the automatically framed position.
+        camera_focal_point : tuple of float or None, default=None
+            Ground-frame point in metres for the camera to look at. ``None``
+            uses the automatically framed target.
+        camera_view_up : tuple of float or None, default=None
+            Ground-frame camera up direction. ``None`` keeps the automatic
+            direction unless another camera vector is supplied.
+        show_ground : bool, default=True
+            Show the ground reference grid.
+        show_muscles : bool, default=True
+            Show muscle paths.
+        show_markers : bool, default=True
+            Show model markers.
+        show_axes : bool, default=True
+            Show the ground-frame XYZ coordinate axes.
+        show_reachability : bool, default=True
+            Show palm reachability regions when present.
+        show_vision_cone : bool, default=True
+            Show the visual cone and its centre line when present.
 
         Returns
         -------
@@ -158,6 +205,9 @@ class VTKViewer:
             ``time_s`` is requested without a motion.
         TypeError
             If ``object`` or ``motion`` has an unsupported type.
+        ValueError
+            If a camera vector is malformed or the requested camera vectors
+            do not define a valid view.
         """
         destination = Path(path)
         extension = destination.suffix.lower()
@@ -167,6 +217,24 @@ class VTKViewer:
             not isinstance(dpi, int) or isinstance(dpi, bool) or dpi <= 0
         ):
             raise ValueError("dpi must be a positive integer for PNG output")
+        visibility_options = {
+            "show_ground": show_ground,
+            "show_muscles": show_muscles,
+            "show_markers": show_markers,
+            "show_axes": show_axes,
+            "show_reachability": show_reachability,
+            "show_vision_cone": show_vision_cone,
+        }
+        for name, value in visibility_options.items():
+            if not isinstance(value, (bool, np.bool_)):
+                raise TypeError(f"{name} must be a boolean")
+        camera_vectors = {
+            "camera_position": _camera_vector("camera_position", camera_position),
+            "camera_focal_point": _camera_vector(
+                "camera_focal_point", camera_focal_point
+            ),
+            "camera_view_up": _camera_vector("camera_view_up", camera_view_up),
+        }
         model = self._native_model(object)
         meta = _ViewerModel(model)
         try:
@@ -191,6 +259,18 @@ class VTKViewer:
         destination.parent.mkdir(parents=True, exist_ok=True)
         visualizer = VTKVisualizer(meta, offscreen=True, size=size)
         try:
+            visualizer.set_ground_visible(show_ground)
+            visualizer.set_muscles_visible(show_muscles)
+            visualizer.set_markers_visible(show_markers)
+            visualizer.set_axes_visible(show_axes)
+            visualizer.set_reachability_visible(show_reachability)
+            visualizer.set_vision_cone_visible(show_vision_cone)
+            if any(value is not None for value in camera_vectors.values()):
+                visualizer.set_camera(
+                    position=camera_vectors["camera_position"],
+                    focal_point=camera_vectors["camera_focal_point"],
+                    view_up=camera_vectors["camera_view_up"],
+                )
             if extension == ".svg":
                 visualizer.save_svg(destination)
             else:
@@ -205,7 +285,16 @@ class VTKViewer:
         file: str | Path,
         *,
         motion: Any,
-        **options: Any,
+        size: tuple[int, int] = DEFAULT_SIZE,
+        camera_position: tuple[float, float, float] | None = None,
+        camera_focal_point: tuple[float, float, float] | None = None,
+        camera_view_up: tuple[float, float, float] | None = None,
+        show_ground: bool = True,
+        show_muscles: bool = True,
+        show_markers: bool = True,
+        show_axes: bool = True,
+        show_reachability: bool = True,
+        show_vision_cone: bool = True,
     ) -> Path:
         """Render a motion of the model to an MP4 without opening a window.
 
@@ -217,10 +306,28 @@ class VTKViewer:
             Destination ``.mp4`` path.
         motion : str, pathlib.Path or opensim.TimeSeriesTable
             Motion whose coordinate columns drive the model.
-        **options
-            Rendering options accepted by
-            :func:`opensim_extensions.animation.save_animation` (``size``,
-            camera vectors and ``show_*`` flags).
+        size : tuple[int, int], default=DEFAULT_SIZE
+            Output frame dimensions in pixels.
+        camera_position : tuple of float or None, default=None
+            Camera position ``(x, y, z)`` in ground-frame metres. ``None``
+            uses the automatically framed position.
+        camera_focal_point : tuple of float or None, default=None
+            Ground-frame point in metres for the camera to look at. ``None``
+            uses the automatically framed target.
+        camera_view_up : tuple of float or None, default=None
+            Ground-frame camera up direction.
+        show_ground : bool, default=True
+            Show the ground reference grid.
+        show_muscles : bool, default=True
+            Show muscle paths.
+        show_markers : bool, default=True
+            Show model markers.
+        show_axes : bool, default=True
+            Show the ground-frame XYZ coordinate axes.
+        show_reachability : bool, default=True
+            Show palm reachability regions when present.
+        show_vision_cone : bool, default=True
+            Show the visual cone and its centre line when present.
 
         Returns
         -------
@@ -228,4 +335,18 @@ class VTKViewer:
             The destination path.
         """
         model = self._native_model(object)
-        return _render_animation(model, self._table(motion), file, **options)
+        return _render_animation(
+            model,
+            self._table(motion),
+            file,
+            size=size,
+            camera_position=camera_position,
+            camera_focal_point=camera_focal_point,
+            camera_view_up=camera_view_up,
+            show_ground=show_ground,
+            show_muscles=show_muscles,
+            show_markers=show_markers,
+            show_axes=show_axes,
+            show_reachability=show_reachability,
+            show_vision_cone=show_vision_cone,
+        )

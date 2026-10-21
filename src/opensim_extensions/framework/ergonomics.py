@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, Self
 
 import numpy as np
-from scipy.optimize import minimize, root, root_scalar
+from scipy.optimize import least_squares, minimize
 from scipy.special import expit
 from scipy.spatial import ConvexHull, QhullError
 
@@ -947,7 +947,9 @@ class VisualErgonomicsFramework(Framework):
         are free except for equipment placement constraints.
 
         If ``inplace`` is false, model copies are optimized and the original
-        framework remains unchanged.
+        framework remains unchanged. If an inclination bound excludes the
+        perpendicular orientation, the closest allowed inclination is used
+        and a warning is emitted.
 
         Parameters
         ----------
@@ -980,9 +982,14 @@ class VisualErgonomicsFramework(Framework):
         TypeError
             If ``inplace`` or a screen parameter has an invalid type.
         ValueError
-            If the line of sight cannot be represented by the screen model,
-            the required pose violates supplied bounds, or no position places
-            every screen corner within arm reach and equipment constraints.
+            If the line of sight cannot be represented by the screen model or
+            no position places every screen corner within arm reach and
+            equipment constraints.
+        Warnings
+        --------
+        UserWarning
+            If the requested inclination range excludes the geometrically
+            required angle; the nearest allowed inclination is used instead.
         """
         if not isinstance(inplace, bool):
             raise TypeError("inplace must be bool")
@@ -1055,15 +1062,20 @@ class VisualErgonomicsFramework(Framework):
             )
         else:
             inclination_bounds = None
-        if inclination_bounds is not None and not (
-            inclination_bounds[0] - 1e-8
-            <= required_inclination
-            <= inclination_bounds[1] + 1e-8
-        ):
-            raise ValueError(
-                "the required screen inclination for perpendicular incidence "
-                "is outside the requested bounds"
+        inclination = required_inclination
+        if inclination_bounds is not None:
+            inclination = min(
+                max(required_inclination, inclination_bounds[0]),
+                inclination_bounds[1],
             )
+            if abs(inclination - required_inclination) > 1e-8:
+                warnings.warn(
+                    "the required screen inclination for perpendicular "
+                    "incidence is outside the requested bounds; using the "
+                    "nearest allowed inclination",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         offset_expansions: dict[str, float | None] = {}
 
@@ -1121,7 +1133,7 @@ class VisualErgonomicsFramework(Framework):
         current_horizontal = screen.horizontal_offset_mm
         current_vertical = screen.vertical_offset_mm
         reference_center = screen.corners(
-            (current_horizontal, current_vertical, required_inclination)
+            (current_horizontal, current_vertical, inclination)
         ).mean(axis=0)
         if abs(float(reference_center[2] - eye[2])) > 1e-8:
             raise ValueError(
@@ -1134,7 +1146,7 @@ class VisualErgonomicsFramework(Framework):
             return (
                 current_horizontal + float(centre[0] - reference_center[0]) * 1000.0,
                 current_vertical + float(centre[1] - reference_center[1]) * 1000.0,
-                required_inclination,
+                inclination,
             )
 
         distance_bounds = [0.0, math.inf]
@@ -1191,7 +1203,7 @@ class VisualErgonomicsFramework(Framework):
             )
 
         corners_at_reference = screen.corners(
-            (current_horizontal, current_vertical, required_inclination)
+            (current_horizontal, current_vertical, inclination)
         )
         corner_offsets = corners_at_reference - reference_center
         reach_spheres = [
@@ -1303,7 +1315,9 @@ class VisualErgonomicsFramework(Framework):
         sight passes through the screen centre. The screen is kept fixed.
         Neck alignment uses the pair of free coordinates with the most
         independent effects on gaze; any other free neck coordinates stay at
-        their current values.
+        their current values. When a requested range prevents exact palm or
+        gaze alignment, the closest posture found within the ranges is kept,
+        a warning is emitted, and optimization continues.
 
         Each upper-body joint coordinate and lumbar flexion/extension is
         exposed as a named argument. ``None`` keeps its current value, a number
@@ -1338,11 +1352,15 @@ class VisualErgonomicsFramework(Framework):
         Raises
         ------
         ValueError
-            If the requested bounds are invalid, the palms cannot be restored
-            within the arm ranges, or the screen centre cannot be aligned with
-            the line of sight within the neck ranges.
+            If the requested bounds are invalid.
         RuntimeError
-            If either inverse-kinematics solve fails to converge.
+            If palm-restoration optimization fails to converge despite
+            satisfying the requested palm-position tolerance.
+        Warnings
+        --------
+        UserWarning
+            If the arm or neck ranges prevent exact restoration/alignment; the
+            closest posture found within the allowed ranges is retained.
         """
         if not isinstance(inplace, bool):
             raise TypeError("inplace must be bool")
@@ -1561,13 +1579,28 @@ class VisualErgonomicsFramework(Framework):
                     constraints=[{"type": "eq", "fun": palm_residual}],
                     options={"maxiter": max_iterations, "ftol": 1e-10, "eps": 1e-3},
                 )
-                final_palm_residual = palm_residual(arm_result.x)
-                if np.max(np.abs(final_palm_residual)) > 1e-4:
-                    raise ValueError(
-                        "no arm posture within the requested ranges can restore "
-                        "the original palm positions"
+                arm_values = np.clip(arm_result.x, arm_lower, arm_upper)
+                final_palm_residual = palm_residual(arm_values)
+                palms_not_restored = np.max(np.abs(final_palm_residual)) > 1e-4
+                if palms_not_restored:
+                    closest_arm_result = least_squares(
+                        palm_residual,
+                        arm_values,
+                        bounds=(arm_lower, arm_upper),
+                        max_nfev=max_iterations * 10,
+                        ftol=1e-10,
+                        xtol=1e-10,
+                        gtol=1e-10,
                     )
-                if not arm_result.success:
+                    final_palm_residual = palm_residual(closest_arm_result.x)
+                    warnings.warn(
+                        "the requested arm ranges cannot restore the original "
+                        "palm positions; continuing with the closest posture "
+                        "found within those ranges",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                elif not arm_result.success:
                     raise RuntimeError(
                         f"palm-restoration optimization did not converge: "
                         f"{arm_result.message}"
@@ -1575,9 +1608,12 @@ class VisualErgonomicsFramework(Framework):
             else:
                 final_palm_residual = palm_residual(np.empty(0))
                 if np.max(np.abs(final_palm_residual)) > 1e-4:
-                    raise ValueError(
+                    warnings.warn(
                         "the fixed arm coordinates cannot restore the original "
-                        "palm positions"
+                        "palm positions; continuing with the closest available "
+                        "posture",
+                        UserWarning,
+                        stacklevel=2,
                     )
 
             neck_free_names = []
@@ -1600,6 +1636,7 @@ class VisualErgonomicsFramework(Framework):
                 _, angles = target._gaze_center_coordinates(screen_position)
                 return angles
 
+            neck_names_to_optimize = neck_free_names
             if len(neck_free_names) >= 2:
                 neck_sensitivities: dict[str, np.ndarray] = {}
                 for name in neck_free_names:
@@ -1634,119 +1671,80 @@ class VisualErgonomicsFramework(Framework):
                     and second in neck_sensitivities
                 ]
                 if not neck_pairs:
-                    raise ValueError(
-                        "the requested neck ranges do not allow gaze alignment"
-                    )
-
-                neck_pair = max(
-                    neck_pairs,
-                    key=lambda pair: abs(
-                        np.linalg.det(
-                            np.column_stack(
-                                (
-                                    neck_sensitivities[pair[0]],
-                                    neck_sensitivities[pair[1]],
-                                )
-                            )
+                    neck_names_to_optimize = [
+                        max(
+                            neck_free_names,
+                            key=lambda name: float(
+                                np.linalg.norm(neck_sensitivities.get(name, 0.0))
+                            ),
                         )
-                    ),
-                )
-                pair_sensitivity = np.column_stack(
-                    (
-                        neck_sensitivities[neck_pair[0]],
-                        neck_sensitivities[neck_pair[1]],
+                    ]
+                else:
+                    neck_names_to_optimize = list(
+                        max(
+                            neck_pairs,
+                            key=lambda pair: abs(
+                                np.linalg.det(
+                                    np.column_stack(
+                                        (
+                                            neck_sensitivities[pair[0]],
+                                            neck_sensitivities[pair[1]],
+                                        )
+                                    )
+                                )
+                            ),
+                        )
                     )
+            if neck_names_to_optimize:
+                neck_initial_values = np.asarray(
+                    [neck_initial[name] for name in neck_names_to_optimize],
+                    dtype=float,
                 )
-                if abs(float(np.linalg.det(pair_sensitivity))) < 1e-10:
-                    raise ValueError(
-                        "the requested neck ranges do not provide independent "
-                        "gaze adjustments"
-                    )
-
-                neck_initial_pair = np.asarray(
-                    [neck_initial[name] for name in neck_pair], dtype=float
+                neck_lower = np.asarray(
+                    [coordinate_bounds[name][0] for name in neck_names_to_optimize],
+                    dtype=float,
+                )
+                neck_upper = np.asarray(
+                    [coordinate_bounds[name][1] for name in neck_names_to_optimize],
+                    dtype=float,
                 )
 
-                def apply_neck_pair(values: np.ndarray) -> None:
-                    for name, value in zip(neck_pair, values):
+                def apply_neck_values(values: np.ndarray) -> None:
+                    for name, value in zip(neck_names_to_optimize, values):
                         coordinates.get(name).setValue(
                             state, math.radians(float(value)), False
                         )
                     user.realizePosition(state)
 
                 def neck_equations(values: np.ndarray) -> np.ndarray:
-                    apply_neck_pair(values)
+                    apply_neck_values(values)
                     return gaze_residual()
 
-                neck_result = root(
+                neck_result = least_squares(
                     neck_equations,
-                    neck_initial_pair,
-                    options={"maxfev": max_iterations * 10, "xtol": 1e-10},
-                )
-                apply_neck_pair(neck_result.x)
-                final_gaze_residual = gaze_residual()
-                outside_neck_bounds = any(
-                    value < coordinate_bounds[name][0] - 1e-7
-                    or value > coordinate_bounds[name][1] + 1e-7
-                    for name, value in zip(neck_pair, neck_result.x)
-                )
-                if outside_neck_bounds or np.max(np.abs(final_gaze_residual)) > 1e-4:
-                    raise ValueError(
-                        "the requested neck ranges cannot align the line of "
-                        "sight with the screen centre"
-                    )
-                if not neck_result.success and np.max(
-                    np.abs(final_gaze_residual)
-                ) > 1e-8:
-                    raise RuntimeError(
-                        f"geometric gaze alignment did not converge: "
-                        f"{neck_result.message}"
-                    )
-            elif len(neck_free_names) == 1:
-                name = neck_free_names[0]
-                low, high = coordinate_bounds[name]
-                coordinate = coordinates.get(name)
-
-                def single_coordinate_residual(value: float) -> np.ndarray:
-                    coordinate.setValue(state, math.radians(value), False)
-                    return gaze_residual()
-
-                lower_residual = single_coordinate_residual(low)
-                upper_residual = single_coordinate_residual(high)
-                component = int(
-                    np.argmax(np.abs(upper_residual - lower_residual))
-                )
-                lower_value = float(lower_residual[component])
-                upper_value = float(upper_residual[component])
-                if lower_value * upper_value > 0.0:
-                    raise ValueError(
-                        "the requested neck range cannot align the line of "
-                        "sight with the screen centre"
-                    )
-                neck_result = root_scalar(
-                    lambda value: float(
-                        single_coordinate_residual(value)[component]
-                    ),
-                    bracket=(low, high),
-                    method="brentq",
+                    neck_initial_values,
+                    bounds=(neck_lower, neck_upper),
+                    max_nfev=max_iterations * 10,
+                    ftol=1e-10,
                     xtol=1e-10,
-                    maxiter=max_iterations,
+                    gtol=1e-10,
                 )
-                final_gaze_residual = single_coordinate_residual(
-                    float(neck_result.root)
-                )
-                if np.max(np.abs(final_gaze_residual)) > 1e-4:
-                    raise ValueError(
-                        "the requested neck range cannot align the line of "
-                        "sight with the screen centre"
-                    )
+                apply_neck_values(neck_result.x)
+                final_gaze_residual = gaze_residual()
             else:
                 final_gaze_residual = gaze_residual()
-                if np.max(np.abs(final_gaze_residual)) > 1e-4:
-                    raise ValueError(
-                        "the fixed neck coordinates cannot align the line of "
-                        "sight with the screen centre"
-                    )
+            if np.max(np.abs(final_gaze_residual)) > 1e-4:
+                residual_degrees = float(
+                    np.linalg.norm(np.degrees(final_gaze_residual))
+                )
+                warnings.warn(
+                    "the requested neck ranges cannot align the line of sight "
+                    "with the screen centre; continuing with the closest "
+                    f"allowed posture (gaze residual {residual_degrees:.3g} "
+                    "degrees)",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
             target._refresh_visualization()
             target.get_view_state()

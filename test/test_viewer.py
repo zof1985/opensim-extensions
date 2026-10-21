@@ -189,6 +189,59 @@ def test_save_snapshot_applies_motion_frame_or_time_without_mutating_model(tmp_p
         viewer.save_snapshot(model, frame=5, path=tmp_path / "x.svg", motion=motion)
 
 
+def test_save_snapshot_exposes_camera_and_visibility_options(monkeypatch, tmp_path):
+    model = make_pin_model()
+    captured = {}
+
+    class FakeVisualizer:
+        def __init__(self, model, **kwargs):
+            captured["visualizer_options"] = kwargs
+
+        def set_camera(self, **kwargs):
+            captured["camera"] = kwargs
+
+        def __getattr__(self, name):
+            if name.startswith("set_") and name.endswith("_visible"):
+                return lambda visible: captured.setdefault(name, visible)
+            raise AttributeError(name)
+
+        def save_svg(self, path):
+            captured["path"] = path
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(viewer_module, "VTKVisualizer", FakeVisualizer)
+    camera = (2.0, 1.0, 0.0)
+    focal_point = (0.0, 1.0, 0.0)
+
+    result = VTKViewer().save_snapshot(
+        model,
+        path=tmp_path / "pose.svg",
+        camera_position=camera,
+        camera_focal_point=focal_point,
+        show_ground=False,
+        show_muscles=False,
+        show_markers=True,
+        show_axes=False,
+        show_reachability=False,
+        show_vision_cone=False,
+    )
+
+    assert result == tmp_path / "pose.svg"
+    assert captured["camera"] == {
+        "position": camera,
+        "focal_point": focal_point,
+        "view_up": None,
+    }
+    assert captured["set_ground_visible"] is False
+    assert captured["set_muscles_visible"] is False
+    assert captured["set_markers_visible"] is True
+    assert captured["set_axes_visible"] is False
+    assert captured["set_reachability_visible"] is False
+    assert captured["set_vision_cone_visible"] is False
+
+
 def test_save_animation_delegates_to_the_renderer(monkeypatch, tmp_path):
     model = make_pin_model()
     captured = {}
@@ -201,9 +254,26 @@ def test_save_animation_delegates_to_the_renderer(monkeypatch, tmp_path):
     motion = make_motion()
 
     result = VTKViewer().save_animation(
-        model, tmp_path / "m.mp4", motion=motion, size=(640, 360)
+        model,
+        tmp_path / "m.mp4",
+        motion=motion,
+        size=(640, 360),
+        camera_position=(2.0, 1.0, 0.0),
+        show_ground=False,
+        show_axes=False,
     )
 
     assert result == tmp_path / "m.mp4"
     assert captured["model"] is model and captured["table"] is motion
-    assert captured["options"] == {"size": (640, 360)}
+    assert captured["options"] == {
+        "size": (640, 360),
+        "camera_position": (2.0, 1.0, 0.0),
+        "camera_focal_point": None,
+        "camera_view_up": None,
+        "show_ground": False,
+        "show_muscles": True,
+        "show_markers": True,
+        "show_axes": False,
+        "show_reachability": True,
+        "show_vision_cone": True,
+    }

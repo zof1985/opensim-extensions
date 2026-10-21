@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from importlib import import_module
 
 opensim = pytest.importorskip("opensim")
 
@@ -40,7 +41,7 @@ def test_save_animation_renders_sto_offscreen_and_restores_pose(
     monkeypatch, tmp_path
 ):
     import imageio
-    import opensim_extensions.viewer.visualizer as visualizer_module
+    visualizer_module = import_module("opensim_extensions.viewer.visualizer")
 
     model = make_model()
     raw_model = model
@@ -84,6 +85,12 @@ def test_save_animation_renders_sto_offscreen_and_restores_pose(
         def set_axes_visible(self, visible):
             visibility_options["axes"] = visible
 
+        def set_reachability_visible(self, visible):
+            visibility_options["reachability"] = visible
+
+        def set_vision_cone_visible(self, visible):
+            visibility_options["vision_cone"] = visible
+
         def close(self):
             pass
 
@@ -107,6 +114,8 @@ def test_save_animation_renders_sto_offscreen_and_restores_pose(
         show_muscles=True,
         show_markers=False,
         show_axes=True,
+        show_reachability=False,
+        show_vision_cone=False,
     )
 
     assert result == destination
@@ -125,6 +134,8 @@ def test_save_animation_renders_sto_offscreen_and_restores_pose(
         "muscles": True,
         "markers": False,
         "axes": True,
+        "reachability": False,
+        "vision_cone": False,
     }
     assert writer.closed
     assert coordinate.getValue(state) == pytest.approx(original_value)
@@ -132,7 +143,7 @@ def test_save_animation_renders_sto_offscreen_and_restores_pose(
 
 def test_save_animation_accepts_sto_path(monkeypatch, tmp_path):
     import imageio
-    import opensim_extensions.viewer.visualizer as visualizer_module
+    visualizer_module = import_module("opensim_extensions.viewer.visualizer")
 
     model = make_model()
     table = make_motion()
@@ -152,6 +163,8 @@ def test_save_animation_accepts_sto_path(monkeypatch, tmp_path):
                 "set_muscles_visible": lambda self, visible: None,
                 "set_markers_visible": lambda self, visible: None,
                 "set_axes_visible": lambda self, visible: None,
+                "set_reachability_visible": lambda self, visible: None,
+                "set_vision_cone_visible": lambda self, visible: None,
                 "close": lambda self: None,
             },
         )(),

@@ -28,7 +28,8 @@ visualizzazione:
 src/opensim_extensions/
 ├── models/
 │   ├── user/       User, riferimenti ANSUR II, scaling e asset anatomici
-│   └── bike/       Bike e fitting cinematico dell'utente
+│   └── equipment/
+│       └── bikes/  Bike, fitting cinematico e attrezzatura
 ├── bodies/         primitive geometriche e builder per corpi OpenSim
 ├── framework/      composizione di modelli e accoppiamenti
 ├── viewer/         scena VTK, player, lettura geometrie ed export SVG
@@ -267,14 +268,23 @@ al piano della testa passante per gli occhi; il default `-15°` indica una
 direzione verso il basso. È indipendente dall'ampiezza del cono: il margine
 superiore del cono coincide sempre con il piano della testa, mentre
 `cone_height_angle_deg` ne stabilisce l'estensione verso il basso. In
-`optimize_screen_position` non usa pesi né modifica la posa di `User`: orienta
-lo schermo perpendicolarmente alla linea di visione corrente e lo trasla lungo
-quella linea fino alla posizione più vicina che soddisfa i vincoli di
-raggiungibilità e di posizionamento dell'attrezzatura. Se la posa corrente non
-consente una soluzione geometrica, solleva `ValueError`; per prima cosa si può
-chiamare `optimize_user_position`. Quest'ultimo non usa pesi: esegue fasi
-sequenziali per massimizzare la raggiungibilità, ripristinare i palmi e
-allineare la linea di visione al centro dello schermo.
+`optimize_screen_position` non modifica la posa di `User`: orienta lo schermo
+perpendicolarmente alla linea di visione corrente e lo trasla lungo quella
+linea fino alla posizione più vicina che soddisfa i vincoli di raggiungibilità
+e di posizionamento dell'attrezzatura. Se l'inclinazione richiesta è fuori dal
+range fornito, usa l'inclinazione ammessa più vicina e genera un `UserWarning`,
+quindi prosegue con il posizionamento. Può comunque sollevare `ValueError` se
+la linea di visione non è rappresentabile dal modello dello schermo o se non
+esiste una posizione che soddisfi gli altri vincoli.
+
+`optimize_user_position` esegue fasi sequenziali per massimizzare la
+raggiungibilità, ripristinare i palmi e allineare la linea di visione al centro
+dello schermo. Se i range di braccia o collo non consentono il ripristino o
+l'allineamento esatto, mantiene la posa ammessa più vicina trovata, genera un
+`UserWarning` e continua invece di interrompere l'ottimizzazione. Il
+posizionamento dei palmi usa una soluzione ai minimi quadrati vincolata ai
+range articolari; per lo sguardo vengono ottimizzate entro i propri limiti le
+coordinate del collo con gli effetti più indipendenti.
 
 Per i parametri dello schermo, un numero fissa l'offset o l'inclinazione e una
 tupla di due numeri definisce un range; gli offset non specificati restano
@@ -289,22 +299,26 @@ oltre alla flesso-estensione lombare; mantiene fisso lo schermo e, per
 default, ottimizza la flesso-estensione della base del collo e la flessione
 del cranio da -45° a 45°, e la rotazione del cranio da -30° a 30°. Se un
 valore o un range supera i limiti attuali di un parametro, i limiti vengono
-ampliati e viene emesso un warning; i vincoli geometrici di fattibilità dello
-schermo restano attivi.
+ampliati e viene emesso un warning. Se i range articolari impediscono di
+raggiungere il target di ripristino dei palmi o di allineamento dello sguardo,
+viene mantenuta la soluzione ammissibile con lo scarto più basso e viene
+emesso un warning; i valori restano entro i range richiesti. Le condizioni di
+input non valide e l'assenza di posizioni dello schermo che rispettino i
+vincoli geometrici continuano invece a produrre `ValueError`.
 Durante `optimize_user_position`, il busto si flette fino a quando l'intero
 schermo rientra in almeno una sfera di raggiungibilità o fino al limite
 consentito. La sfera è centrata sul giunto della spalla e il raggio è la
 massima distanza spalla-palmo campionata con il gomito completamente esteso.
 Successivamente i palmi vengono riportati alle posizioni iniziali mediante
-flessione di spalle, gomiti, avambracci e polsi; infine il collo viene regolato
-per allineare la linea di visione al centro dello schermo mediante una soluzione
-geometrica delle coordinate, senza ottimizzare una loss. L'ottimizzatore viene
-usato solo per ripristinare i palmi; l'allineamento del collo seleziona le due
-coordinate libere con effetti più indipendenti sullo sguardo e lascia invariate
-le altre. Le metriche vengono calcolate sulla posa finale; per la raggiungibilità
-del contatto con lo schermo si considera l'estensione della mano dal centro del
-palmo fino all'estremità distale. La fase lombare continua invece a usare il
-raggio spalla-centro palmo definito al punto 1.
+flessione di spalle, gomiti, avambracci e polsi; se i limiti lo impediscono,
+viene mantenuta la posa entro i limiti che minimizza lo scarto. Infine il collo
+viene regolato per allineare la linea di visione al centro dello schermo tramite
+un'ottimizzazione ai minimi quadrati vincolata ai range. Vengono selezionate le
+due coordinate libere con effetti più indipendenti sullo sguardo e le altre
+restano invariate. Le metriche vengono calcolate sulla posa finale; per la
+raggiungibilità del contatto con lo schermo si considera l'estensione della
+mano dal centro del palmo fino all'estremità distale. La fase lombare continua
+invece a usare il raggio spalla-centro palmo definito al punto 1.
 
 Il raggio di raggiungibilità spalla-palmo viene stimato con il gomito esteso,
 campionando un range di flessione della spalla 0–180° e di
@@ -438,8 +452,30 @@ viewer.save_snapshot(
     path="output/pose.svg",
     motion="motion.sto",
     time_s=1.5,
+    camera_position=(2.0, 1.5, 0.0),
+    camera_focal_point=(0.0, 1.0, 0.0),
+    camera_view_up=(0.0, 1.0, 0.0),
+    show_ground=False,
+    show_axes=True,
+    show_muscles=False,
+    show_markers=True,
+    show_reachability=False,
+    show_vision_cone=True,
 )
-viewer.save_animation(framework, "output/motion.mp4", motion="motion.sto")
+viewer.save_animation(
+    framework,
+    "output/motion.mp4",
+    motion="motion.sto",
+    camera_position=(2.0, 1.5, 0.0),
+    camera_focal_point=(0.0, 1.0, 0.0),
+    camera_view_up=(0.0, 1.0, 0.0),
+    show_ground=False,
+    show_axes=True,
+    show_muscles=False,
+    show_markers=True,
+    show_reachability=False,
+    show_vision_cone=True,
+)
 ```
 
 `show()` apre il visualizzatore interattivo e restituisce una finestra di
@@ -455,10 +491,19 @@ finestra, in base all'estensione del percorso. Per i PNG, `dpi` imposta i DPI
 registrati nei metadati (default 300); non cambia le dimensioni in pixel,
 configurabili con `size`. `frame` seleziona una riga della tabella di movimento
 e `time_s` interpola la posa al tempo indicato. Senza una tabella, viene usata
-la posa corrente. Le altre estensioni non sono supportate.
+la posa corrente. `camera_position`, `camera_focal_point` e `camera_view_up`
+posizionano la camera e il suo punto di osservazione in coordinate mondo
+espresse in metri; se omessi, viene usata la vista inquadrata automaticamente.
+I flag booleani `show_ground`, `show_axes`, `show_muscles`, `show_markers`,
+`show_reachability` e `show_vision_cone` controllano la griglia del terreno,
+il sistema di riferimento XYZ, i percorsi muscolari, i marker e gli overlay;
+sono tutti attivi per default. Le altre estensioni non sono supportate.
 `save_animation()` esporta un video **MP4** off-screen e ripristina i valori
-delle coordinate del modello dopo il rendering. Anche `User.show()` e
-`Framework.show()` offrono l'apertura rapida del visualizzatore.
+delle coordinate del modello dopo il rendering. Accetta le stesse opzioni di
+camera e visibilità di `save_snapshot()`; `size` configura le dimensioni dei
+fotogrammi. Se si specifica una qualsiasi opzione di camera, i vettori omessi
+mantengono i valori automatici correnti. Anche `User.show()` e `Framework.show()`
+offrono l'apertura rapida del visualizzatore.
 
 ## Test
 

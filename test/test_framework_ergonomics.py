@@ -518,15 +518,57 @@ def test_optimize_user_position_aligns_gaze_without_neck_optimization(
     assert gaze_angles == pytest.approx((0.0, 0.0), abs=1e-4)
 
 
-def test_screen_optimization_rejects_incompatible_inclination_and_preserves_user(
+def test_screen_optimization_uses_nearest_allowed_inclination(
     screen_ready_manager,
 ):
     user_before = _coordinate_snapshot(screen_ready_manager)
 
-    with pytest.raises(ValueError, match="required screen inclination"):
-        screen_ready_manager.optimize_screen_position(screen_inclination_deg=0.0)
+    with pytest.warns(UserWarning, match="nearest allowed inclination"):
+        optimized = screen_ready_manager.optimize_screen_position(
+            screen_inclination_deg=0.0
+        )
 
     assert _coordinate_snapshot(screen_ready_manager) == user_before
+    assert optimized.equipment.screen_inclination_deg == pytest.approx(0.0)
+
+
+def test_user_optimization_warns_and_keeps_nearest_gaze_posture(manager):
+    equipment = manager.equipment
+    original_position = (
+        equipment.screen_horizontal_offset_mm,
+        equipment.screen_vertical_offset_mm,
+        equipment.screen_inclination_deg,
+    )
+    equipment.set_screen_position(
+        original_position[0] + 500.0,
+        original_position[1] + 500.0,
+        original_position[2],
+    )
+    coordinates = manager.user.getCoordinateSet()
+    state = manager._user_state()
+    neck_parameters = {
+        "neck_base_flexion_deg": "neck_base_flexion",
+        "neck_base_lateral_flexion_deg": "neck_base_lateral_flexion",
+        "neck_lateral_flexion_deg": "neck_lateral_flexion",
+        "neck_rotation_deg": "neck_rotation",
+        "neck_flexion_deg": "neck_flexion",
+    }
+    fixed_angles = {
+        parameter: math.degrees(coordinates.get(name).getValue(state))
+        for parameter, name in neck_parameters.items()
+    }
+    try:
+        with pytest.warns(UserWarning, match="cannot align the line of sight"):
+            optimized = manager.optimize_user_position(**fixed_angles)
+    finally:
+        equipment.set_screen_position(*original_position)
+
+    optimized_coordinates = optimized.user.getCoordinateSet()
+    optimized_state = optimized._user_state()
+    for parameter, name in neck_parameters.items():
+        assert math.degrees(
+            optimized_coordinates.get(name).getValue(optimized_state)
+        ) == pytest.approx(fixed_angles[parameter])
 
 
 def test_reachability_hull_uses_fully_extended_palm_markers_independent_of_grip(

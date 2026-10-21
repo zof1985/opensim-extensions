@@ -32,6 +32,8 @@ def save_animation(
     show_muscles: bool = True,
     show_markers: bool = True,
     show_axes: bool = True,
+    show_reachability: bool = True,
+    show_vision_cone: bool = True,
 ) -> Path:
     """Render an OpenSim motion table to an MP4 without opening a window.
 
@@ -73,6 +75,11 @@ def save_animation(
         Show model markers. Defaults to ``True``.
     show_axes : bool, optional
         Show the ground-frame XYZ axes. Defaults to ``True``.
+    show_reachability : bool, optional
+        Show palm reachability regions when present. Defaults to ``True``.
+    show_vision_cone : bool, optional
+        Show the visual cone and its centre line when present. Defaults to
+        ``True``.
 
     Returns
     -------
@@ -147,6 +154,8 @@ def save_animation(
         "show_muscles": show_muscles,
         "show_markers": show_markers,
         "show_axes": show_axes,
+        "show_reachability": show_reachability,
+        "show_vision_cone": show_vision_cone,
     }
     for name, value in visibility_options.items():
         if not isinstance(value, (bool, np.bool_)):
@@ -231,6 +240,8 @@ def save_animation(
         visualizer.set_muscles_visible(show_muscles)
         visualizer.set_markers_visible(show_markers)
         visualizer.set_axes_visible(show_axes)
+        visualizer.set_reachability_visible(show_reachability)
+        visualizer.set_vision_cone_visible(show_vision_cone)
         if any(value is not None for value in camera_vectors.values()):
             visualizer.set_camera(
                 position=camera_vectors["camera_position"],

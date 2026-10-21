@@ -192,13 +192,15 @@ def test_bike_defaults_and_only_pedals_move():
         1
     ) == pytest.approx(before.get(1))
     tip = bike.getBodySet().get("pedal_right").getPositionInGround(bike.state)
-    assert tip.get(1) == pytest.approx(0.25 + 0.1725)
+    assert tip.get(1) == pytest.approx(
+        bike.crank_axis_position[1] * 1e-3 + bike.crank_length_mm * 1e-3
+    )
 
 
 def test_bike_public_positions_are_in_millimetres():
     bike = Bike()
 
-    assert np.allclose(bike.crank_axis_position, [0.0, 250.0, 0.0])
+    assert np.allclose(bike.crank_axis_position, [0.0, 322.0, 0.0])
     assert bike.pedal_lateral_offset == pytest.approx(185.0 / 2 + 70.0)
     positions = (
         (bike.seat_tube_top, bike._seat_tube_top_at(bike._seat_tube_step)),
@@ -370,7 +372,7 @@ def test_bike_screen_offsets_must_be_positive():
 
 
 def test_fit_user_places_user_on_bike():
-    bike = Bike(handlebar_tube_range_mm=((600, 750), (635, 997.6)))
+    bike = Bike(handlebar_tube_range_mm=((600, 750), (635, 1078.0)))
     user = User("M", height_cm=178)
     framework = bike.fit_user(user, trunk_angle_deg=None)
 
