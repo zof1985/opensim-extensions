@@ -244,6 +244,7 @@ bike.fit_user(user)
 ergonomics = VisualErgonomicsFramework(
     user,
     bike,
+    line_of_sight_offset_deg=-15.0,
 )
 
 optimized = ergonomics.optimize_screen_position(
@@ -258,11 +259,22 @@ optimized = ergonomics.optimize_screen_position(
 view_state = optimized.get_view_state()
 
 optimized_user = ergonomics.optimize_user_position(
+    incidence_weight=0.3,
+    observed_screen_weight=0.2,
+    reachability_weight=0.3,
+    neck_flexion_weight=0.2,
     neck_base_flexion_deg=(-30.0, 30.0),
     lumbar_extension_deg=0.0,
-    arm_flex_r_deg=(20.0, 90.0),
+    right_shoulder_flexion_deg=(20.0, 90.0),
 )
 ```
+
+`line_of_sight_offset_deg` configura l'angolo della linea di visione rispetto
+al piano della testa passante per gli occhi; il default `-15°` indica una
+direzione verso il basso. In `optimize_user_position`, i quattro pesi devono
+essere compresi tra 0 e 1 e sommare a 1; il peso `neck_flexion_weight`
+penalizza la deviazione della flesso-estensione del collo dalla posizione
+neutra.
 
 Per i parametri di posa dello schermo e per le coordinate di `User`, `None`
 mantiene il valore corrente, un numero fissa il valore e una tupla di due
@@ -274,10 +286,16 @@ da -30° a 30°). Se un valore o un range supera i limiti attuali di un
 parametro, i limiti vengono ampliati e viene emesso un warning; i vincoli
 geometrici di fattibilità dello schermo restano attivi.
 
-Per impostazione predefinita, il cono copre 30° in orizzontale (15° per lato)
-e 30° verso il basso in verticale. Il limite verticale rappresenta la zona
-visiva preferita indicata dal CCOHS, centrata circa 15° sotto l'orizzontale;
-gli studi di Turville et al. (1998) e Burgess-Limerick et al. (2000)
+Le superfici di raggiungibilità usano un range di flessione della spalla
+0–180° e di adduzione/abduzione −30–30°; avambraccio e polso mantengono i
+range definiti dal modello.
+
+Per impostazione predefinita, la linea di visione è inclinata di 15° verso il
+basso rispetto al piano della testa passante per gli occhi. Il cono, centrato
+sulla linea di visione, ha un'ampiezza verticale totale di 30° e copre quindi
+approssimativamente da 0° a 30° sotto il piano degli occhi. In orizzontale
+copre 30° totali (15° per lato). Gli studi di Turville et al. (1998) e
+Burgess-Limerick et al. (2000)
 supportano il posizionamento del display al di sotto del livello degli occhi e
 segnalano i compromessi posturali a inclinazioni maggiori. Le fonti non
 definiscono un limite numerico orizzontale equivalente: i 30° totali sono

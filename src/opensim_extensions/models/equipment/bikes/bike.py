@@ -818,7 +818,7 @@ class Bike(Equipment):
         """
         parameters: dict[str, Any] = {}
         for name, parameter in inspect.signature(
-            type(self).__init__
+            Bike.__init__
         ).parameters.items():
             if name == "self" or parameter.kind is inspect.Parameter.VAR_KEYWORD:
                 continue
@@ -828,7 +828,12 @@ class Bike(Equipment):
                 parameters[name] = getattr(self, name)
             elif hasattr(self, f"_{name}"):
                 parameters[name] = getattr(self, f"_{name}")
-        clone = type(self)(**parameters)
+        clone = type(self).__new__(type(self))
+        Bike.__init__(clone, **parameters)
+        clone._screen_horizontal_offset_min_mm = (
+            self._screen_horizontal_offset_min_mm
+        )
+        clone._screen_vertical_offset_min_mm = self._screen_vertical_offset_min_mm
         clone.set_crank_angle_deg(self.crank_angle_deg)
         clone.set_pedal_right_angle_deg(self.pedal_right_angle_deg)
         clone.set_pedal_left_angle_deg(self.pedal_left_angle_deg)

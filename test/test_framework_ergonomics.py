@@ -1,3 +1,4 @@
+import inspect
 import math
 import sys
 from pathlib import Path
@@ -73,10 +74,33 @@ def test_ergonomics_framework_is_renderable_and_reports_view_state(manager):
 
 
 def test_visual_cone_defaults_use_documented_ergonomic_values(manager):
-    framework = VisualErgonomicsFramework(manager.user, manager.equipment)
+    framework = VisualErgonomicsFramework(
+        manager.user,
+        manager.equipment,
+        line_of_sight_offset_deg=-25.0,
+    )
 
     assert framework.cone_width_angle_deg == pytest.approx(30.0)
     assert framework.cone_height_angle_deg == pytest.approx(30.0)
+    assert framework.line_of_sight_offset_deg == pytest.approx(-25.0)
+    _, configured_rotation = framework._eye_center_and_line_of_sight_rotation()
+    _, head_rotation = framework._eye_center_and_head_rotation()
+    offset = math.radians(-25.0)
+    assert configured_rotation[:, 0] == pytest.approx(
+        math.cos(offset) * head_rotation[:, 0]
+        + math.sin(offset) * head_rotation[:, 1]
+    )
+
+def test_line_of_sight_is_tilted_down_from_head_plane(manager):
+    _, head_rotation = manager._eye_center_and_head_rotation()
+    _, visual_rotation = manager._eye_center_and_line_of_sight_rotation()
+    downward = math.radians(abs(manager.line_of_sight_offset_deg))
+    expected_forward = (
+        math.cos(downward) * head_rotation[:, 0]
+        - math.sin(downward) * head_rotation[:, 1]
+    )
+
+    assert visual_rotation[:, 0] == pytest.approx(expected_forward)
 
 
 def test_optimization_returns_independent_framework_and_respects_screen_bounds(manager):
@@ -100,6 +124,9 @@ def test_optimization_returns_independent_framework_and_respects_screen_bounds(m
     assert isinstance(optimized.user, User)
     assert optimized.user is not original_user
     assert optimized.equipment is not original_bike
+    assert optimized.line_of_sight_offset_deg == pytest.approx(
+        manager.line_of_sight_offset_deg
+    )
     assert original_user.neck_flexion == pytest.approx(original_neck)
     assert original_bike.screen_inclination_deg == pytest.approx(original_screen)
     optimized.user.set_neck_flexion(-5.0)
@@ -199,7 +226,7 @@ def test_optimize_user_position_fixes_float_and_expands_coordinate_limits(manage
     with pytest.warns(UserWarning, match="expanding the limits"):
         optimized = manager.optimize_user_position(
             neck_base_flexion_deg=target_degrees,
-            arm_flex_r_deg=arm_flexion_degrees,
+            right_shoulder_flexion_deg=arm_flexion_degrees,
             lumbar_extension_deg=trunk_flexion_degrees,
         )
 
@@ -227,35 +254,67 @@ def test_optimize_user_position_fixes_float_and_expands_coordinate_limits(manage
     ).getRangeMin() > np.deg2rad(target_degrees)
 
 
+def test_user_position_joint_arguments_match_user_properties():
+    parameters = inspect.signature(
+        VisualErgonomicsFramework.optimize_user_position
+    ).parameters
+    joint_property_names = [
+        name.removesuffix("_deg")
+        for name in parameters
+        if name.endswith("_deg")
+    ]
+
+    assert joint_property_names
+    assert all(
+        isinstance(getattr(User, name, None), property)
+        for name in joint_property_names
+    )
+
+
 def test_optimize_user_position_defaults_to_neck_range(manager):
     coordinates = manager.user.getCoordinateSet()
     original_state = manager._user_state()
+    neck_coordinate = coordinates.get("neck_base_flexion")
+    original_neck = neck_coordinate.getValue(original_state)
     original_other_coordinate = coordinates.get("neck_rotation").getValue(
         original_state
     )
 
-    optimized = manager.optimize_user_position(
-        incidence_weight=1.0,
-        observed_screen_weight=0.0,
-        reachability_weight=0.0,
-        max_iterations=20,
-    )
+    neck_coordinate.setValue(original_state, np.deg2rad(20.0), False)
+    manager.user.realizePosition(original_state)
+    try:
+        optimized = manager.optimize_user_position(
+            incidence_weight=0.0,
+            observed_screen_weight=0.0,
+            reachability_weight=0.0,
+            neck_flexion_weight=1.0,
+            max_iterations=60,
+        )
+    finally:
+        neck_coordinate.setValue(original_state, original_neck, False)
+        manager.user.realizePosition(original_state)
 
     neck = optimized.user.getCoordinateSet().get("neck_base_flexion")
     neck_value_deg = math.degrees(neck.getValue(optimized._user_state()))
-    assert -30.0 <= neck_value_deg <= 30.0
+    assert neck_value_deg == pytest.approx(0.0, abs=0.1)
     assert optimized.user.getCoordinateSet().get("neck_rotation").getValue(
         optimized._user_state()
     ) == pytest.approx(original_other_coordinate)
 
 
 def test_optimization_requires_valid_weights(manager):
-
     with pytest.raises(ValueError, match="sum to 1"):
         manager.optimize_screen_position(
             incidence_weight=0.4,
             observed_screen_weight=0.4,
             reachability_weight=0.4,
+        )
+    with pytest.raises(ValueError, match="sum to 1"):
+        manager.optimize_user_position(
+            incidence_weight=0.3,
+            observed_screen_weight=0.2,
+            reachability_weight=0.3,
+            neck_flexion_weight=0.3,
         )
 
 
@@ -306,6 +365,10 @@ def test_reachability_hull_includes_effective_shoulder_range_boundaries(manager)
         )
     ]
     sampled = [coordinates.get(name) for name in names]
+    reachability_ranges = {
+        "arm_flex_r": (0.0, math.pi),
+        "arm_add_r": (math.radians(-30.0), math.radians(30.0)),
+    }
     elbow = coordinates.get("elbow_flex_r")
     original = [coordinate.getValue(state) for coordinate in sampled]
     original_elbow = elbow.getValue(state)
@@ -314,12 +377,12 @@ def test_reachability_hull_includes_effective_shoulder_range_boundaries(manager)
 
     try:
         for boundary in ("min", "max"):
-            for coordinate in sampled:
-                value = (
-                    coordinate.getRangeMin()
-                    if boundary == "min"
-                    else coordinate.getRangeMax()
+            for name, coordinate in zip(names, sampled):
+                lower, upper = reachability_ranges.get(
+                    name,
+                    (coordinate.getRangeMin(), coordinate.getRangeMax()),
                 )
+                value = lower if boundary == "min" else upper
                 coordinate.setValue(state, value, False)
             elbow.setValue(state, elbow.getRangeMin(), False)
             user.realizePosition(state)

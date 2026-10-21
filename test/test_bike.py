@@ -20,6 +20,7 @@ from opensim_extensions.bodies import (
 )
 from opensim_extensions.models.equipment import Equipment, Screen
 from opensim_extensions.models.equipment.bikes.bike import _horn_direction
+from opensim_extensions.models.equipment.bikes.groupcycle3 import GroupCycle3
 
 
 def _forefoot_midpoint_pedal_coordinates_mm(bike, user, side):
@@ -298,6 +299,20 @@ def test_bike_screen_geometry_and_center_follow_configured_offsets():
         bike.handlebar_position[0] + 80.0
     )
     assert bike.getBodySet().get("screen") is not None
+
+
+def test_groupcycle3_clone_preserves_selected_adjustments():
+    bike = GroupCycle3()
+    bike.set_handlebar_tube_step(0)
+    bike.set_handlebar_slide_step(10)
+
+    clone = bike.clone()
+
+    assert isinstance(clone, GroupCycle3)
+    assert clone.handlebar_position == pytest.approx(bike.handlebar_position)
+    assert clone.screen.position_anchor_m == pytest.approx(
+        bike.screen.position_anchor_m
+    )
 
 
 def test_bike_directed_angles_use_the_world_xy_reference():

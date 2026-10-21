@@ -96,14 +96,14 @@ def _pyramid_mesh(
     width_angle: float, height_angle: float, length: float
 ) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
     half_width = length * math.tan(math.radians(width_angle) / 2)
-    drop = length * math.tan(math.radians(height_angle))
+    vertical_half_extent = length * math.tan(math.radians(height_angle) / 2)
     points = np.array(
         [
             (0.0, 0.0, 0.0),
-            (length, -drop, -half_width),
-            (length, -drop, half_width),
-            (length, 0.0, half_width),
-            (length, 0.0, -half_width),
+            (length, vertical_half_extent, -half_width),
+            (length, vertical_half_extent, half_width),
+            (length, -vertical_half_extent, half_width),
+            (length, -vertical_half_extent, -half_width),
         ],
         dtype=float,
     )
@@ -137,12 +137,13 @@ class VisualErgonomicsFramework(Framework):
     and offsets are in millimetres.
 
     The default visual cone uses a 30-degree full horizontal width and a
-    30-degree downward extent. The vertical extent represents the preferred
-    display zone from eye level to 30 degrees below it, centred on the
-    approximately 15-degree downward line of sight recommended for display
-    work. The literature does not prescribe a matching numeric horizontal
-    cone width; 30 degrees total (15 degrees to either side) is a conservative
-    symmetric modelling choice, not a separate standard limit.
+    30-degree full vertical height, centred on a line of sight 15 degrees
+    below the head plane through the eyes. This offset is configurable through
+    ``line_of_sight_offset_deg``. The default places the vertical zone from
+    approximately eye level to 30 degrees below it. The literature does not
+    prescribe a matching numeric horizontal cone width; 30 degrees total (15
+    degrees to either side) is a conservative symmetric modelling choice, not
+    a separate standard limit.
 
     References
     ----------
@@ -172,6 +173,7 @@ class VisualErgonomicsFramework(Framework):
         equipment: Equipment,
         cone_width_angle_deg: float = 30.0,
         cone_height_angle_deg: float = 30.0,
+        line_of_sight_offset_deg: float = -15.0,
     ) -> None:
         """Create a visual-ergonomics framework for a user and equipment.
 
@@ -192,9 +194,11 @@ class VisualErgonomicsFramework(Framework):
             vertical; this symmetric horizontal width is a conservative
             modelling choice.
         cone_height_angle_deg : float, default=30.0
-            Maximum downward angle from horizontal, in degrees, representing
-            the preferred vertical display zone centred about 15 degrees
-            below eye level.
+            Full vertical visual-cone angle in degrees, centred on a line of
+            sight offset from the head plane through the eyes.
+        line_of_sight_offset_deg : float, default=-15.0
+            Signed angle between the head plane through the eyes and the line
+            of sight, in degrees. Negative values point downward.
 
         Raises
         ------
@@ -202,8 +206,8 @@ class VisualErgonomicsFramework(Framework):
             If ``user`` is not an OpenSim model or ``equipment`` is not an
             :class:`Equipment`.
         ValueError
-            If the equipment has no screen, or either cone angle is not finite
-            or falls outside its supported interval.
+            If the equipment has no screen, or an angle is not finite or falls
+            outside its supported interval.
 
         References
         ----------
@@ -222,8 +226,12 @@ class VisualErgonomicsFramework(Framework):
             raise ValueError("equipment must provide a screen for visual ergonomics")
         self._validate_angle("cone_width_angle_deg", cone_width_angle_deg, 0.0, 180.0)
         self._validate_angle("cone_height_angle_deg", cone_height_angle_deg, 0.0, 89.0)
+        self._validate_angle("line_of_sight_offset_deg", line_of_sight_offset_deg, -89.0, 89.0)
         object.__setattr__(self, "cone_width_angle_deg", float(cone_width_angle_deg))
         object.__setattr__(self, "cone_height_angle_deg", float(cone_height_angle_deg))
+        object.__setattr__(
+            self, "line_of_sight_offset_deg", float(line_of_sight_offset_deg)
+        )
         object.__setattr__(
             self,
             "_geometry_directory",
@@ -306,6 +314,18 @@ class VisualErgonomicsFramework(Framework):
         skull = self.user.getBodySet().get("skull")
         return eyes.mean(axis=0), _rotation_in_ground(skull, state)
 
+    def _eye_center_and_line_of_sight_rotation(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return eye midpoint and configured line-of-sight frame."""
+        eye, head_rotation = self._eye_center_and_head_rotation()
+        offset = math.radians(self.line_of_sight_offset_deg)
+        cosine, sine = math.cos(offset), math.sin(offset)
+        offset_rotation = np.array(
+            [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]]
+        )
+        return eye, head_rotation @ offset_rotation
+
     def _screen_points(self, position: Sequence[float] | None = None) -> np.ndarray:
         candidate = None if position is None else tuple(map(float, position))
         return self.screen.corners(candidate)
@@ -318,10 +338,10 @@ class VisualErgonomicsFramework(Framework):
         """Evaluate incidence, visual coverage, and reachable screen coverage.
 
         Incidence is computed from the eye midpoint, screen centre, and screen
-        normal. Visibility uses the rectangular visual cone in head-local
-        coordinates. Visibility and reachability are reported as the
-        proportions of the uniform screen samples that satisfy their
-        respective predicates.
+        normal. Visibility uses the rectangular visual cone in
+        line-of-sight-local coordinates. Visibility and reachability are
+        reported as the proportions of the uniform screen samples that satisfy
+        their respective predicates.
 
         Parameters
         ----------
@@ -341,7 +361,7 @@ class VisualErgonomicsFramework(Framework):
         ValueError
             If the screen centre coincides with the eye midpoint.
         """
-        eye, head_rotation = self._eye_center_and_head_rotation()
+        eye, visual_rotation = self._eye_center_and_line_of_sight_rotation()
         screen = self._screen_points(position)
         screen_center = screen.mean(axis=0)
         inclination = math.radians(
@@ -359,15 +379,15 @@ class VisualErgonomicsFramework(Framework):
         )
 
         points = self._screen_samples(position)
-        local = (points - eye) @ head_rotation
+        local = (points - eye) @ visual_rotation
         forward = local[:, 0]
         horizontal_angle = np.arctan2(np.abs(local[:, 2]), np.maximum(forward, 1e-12))
         downward_angle = np.arctan2(-local[:, 1], np.maximum(forward, 1e-12))
+        vertical_half_angle = math.radians(self.cone_height_angle_deg / 2)
         visible = (
             (forward > 0.0)
             & (horizontal_angle <= math.radians(self.cone_width_angle_deg / 2))
-            & (downward_angle >= 0.0)
-            & (downward_angle <= math.radians(self.cone_height_angle_deg))
+            & (np.abs(downward_angle) <= vertical_half_angle)
         )
         reachable = self._reachable_screen_samples(points)
         return {
@@ -379,10 +399,10 @@ class VisualErgonomicsFramework(Framework):
     def _optimization_scores(self, position: Sequence[float]) -> np.ndarray:
         """Compute smooth objective scores for one candidate screen pose.
 
-        Incidence is normalized to a score in ``[0, 1]``. Visual-cone margins
-        and signed distances from each palm reachability hull are converted
-        through logistic functions, giving the optimizer smooth approximations
-        to the visible and reachable sample fractions.
+        Incidence and gaze alignment are combined into a score in ``[0, 1]``.
+        Visual-cone margins and signed distances from each palm reachability
+        hull are converted through logistic functions, giving the optimizer
+        smooth approximations to the visible and reachable sample fractions.
 
         Parameters
         ----------
@@ -393,24 +413,40 @@ class VisualErgonomicsFramework(Framework):
         Returns
         -------
         numpy.ndarray, shape (3,)
-            Scores ordered as incidence, visibility, and reachability. Each
-            component is maximized by the screen-position optimizer.
+            Scores ordered as incidence/alignment, visibility, and
+            reachability. Each component is maximized by the optimizer.
         """
         metrics = self._metrics(position)
-        eye, head_rotation = self._eye_center_and_head_rotation()
+        eye, visual_rotation = self._eye_center_and_line_of_sight_rotation()
         points = self._screen_samples(position)
-        local = (points - eye) @ head_rotation
+        screen_center_direction = points.mean(axis=0) - eye
+        screen_center_direction /= np.linalg.norm(screen_center_direction)
+        gaze_alignment_angle = math.degrees(
+            math.acos(
+                float(
+                    np.clip(
+                        np.dot(visual_rotation[:, 0], screen_center_direction),
+                        -1.0,
+                        1.0,
+                    )
+                )
+            )
+        )
+        incidence_score = 1.0 - min(
+            metrics["incidence_angle_deg"] + gaze_alignment_angle, 90.0
+        ) / 90.0
+        local = (points - eye) @ visual_rotation
         forward = local[:, 0]
         horizontal = np.arctan2(np.abs(local[:, 2]), np.maximum(forward, 1e-12))
         downward = np.arctan2(-local[:, 1], np.maximum(forward, 1e-12))
         angular_scale = math.radians(2.0)
+        vertical_half_angle = math.radians(self.cone_height_angle_deg / 2)
         cone_margin = np.minimum.reduce(
             (
                 forward / 0.02,
                 (math.radians(self.cone_width_angle_deg / 2) - horizontal)
                 / angular_scale,
-                downward / angular_scale,
-                (math.radians(self.cone_height_angle_deg) - downward) / angular_scale,
+                (vertical_half_angle - np.abs(downward)) / angular_scale,
             )
         )
         visible_score = float(np.mean(expit(cone_margin)))
@@ -434,7 +470,7 @@ class VisualErgonomicsFramework(Framework):
         )
         return np.array(
             [
-                1.0 - metrics["incidence_angle_deg"] / 90.0,
+                incidence_score,
                 visible_score,
                 reachable_score,
             ]
@@ -445,16 +481,16 @@ class VisualErgonomicsFramework(Framework):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Sample palm-centre positions and construct their convex hull.
 
-        Shoulder flexion/extension, shoulder adduction/abduction, forearm, and
-        wrist coordinates are sampled across their effective OpenSim
-        coordinate ranges. In addition to deterministic combinations of all
-        range endpoints, seeded random samples cover the interior. The elbow
-        is fixed at its minimum coordinate value, which represents full
-        extension in the bundled model. Trunk and pelvis coordinates remain
-        at the current posture. The method restores all sampled coordinates
-        after realization and caches the points, hull plane equations, and
-        triangular surface facets by posture, anthropometric dimensions, and
-        coordinate ranges.
+        Shoulder flexion is sampled from 0 to 180 degrees and shoulder
+        adduction/abduction from -30 to 30 degrees. Forearm and wrist
+        coordinates use their effective OpenSim ranges. In addition to
+        deterministic combinations of all range endpoints, seeded random
+        samples cover the interior. The elbow is fixed at its minimum
+        coordinate value, which represents full extension in the bundled
+        model. Trunk and pelvis coordinates remain at the current posture. The
+        method restores all sampled coordinates after realization and caches
+        the points, hull plane equations, and triangular surface facets by
+        posture, anthropometric dimensions, and coordinate ranges.
 
         Parameters
         ----------
@@ -522,8 +558,26 @@ class VisualErgonomicsFramework(Framework):
         fixed_coordinates = [
             coordinates.get(f"{name}_{side}") for name in _REACH_FIXED_COORDINATES
         ]
-        lower = np.array([coordinate.getRangeMin() for coordinate in coordinate_values])
-        upper = np.array([coordinate.getRangeMax() for coordinate in coordinate_values])
+        shoulder_ranges = {
+            "arm_flex": (0.0, math.pi),
+            "arm_add": (math.radians(-30.0), math.radians(30.0)),
+        }
+        lower = np.array(
+            [
+                shoulder_ranges[name][0]
+                if name in shoulder_ranges
+                else coordinate.getRangeMin()
+                for name, coordinate in zip(_REACH_COORDINATES, coordinate_values)
+            ]
+        )
+        upper = np.array(
+            [
+                shoulder_ranges[name][1]
+                if name in shoulder_ranges
+                else coordinate.getRangeMax()
+                for name, coordinate in zip(_REACH_COORDINATES, coordinate_values)
+            ]
+        )
         key += tuple(
             round(float(value), 6)
             for bounds in zip(lower, upper)
@@ -595,7 +649,9 @@ class VisualErgonomicsFramework(Framework):
         midpoint of the eye markers to the screen centre. Visibility and
         reachability percentages are sampled on a uniform screen grid.
         Reachability is the union of the convex hulls of the palm-centre
-        marker positions sampled over shoulder, forearm, and wrist motion.
+        marker positions sampled with shoulder flexion from 0 to 180 degrees
+        and adduction/abduction from -30 to 30 degrees, together with the
+        forearm and wrist ranges.
         The elbow is held at its full-extension limit, independently of its
         current grip posture or any optimization coordinate bounds; trunk and
         pelvis coordinates remain at their current values.
@@ -782,14 +838,17 @@ class VisualErgonomicsFramework(Framework):
             str, OptimizationParameter
         ]
         | None = None,
+        _neck_flexion_weight: float | None = None,
         max_iterations: int = 100,
     ) -> Self | None:
         """Optimize screen position and selected rider coordinates.
 
         The objective combines screen incidence, visibility within the visual
-        cone, and palm-marker reachability. A bounded numerical optimization
-        evaluates the screen on a regular grid; the palm reachability objective
-        uses the extended-arm hulls independently of any fitted grip posture.
+        cone, and palm-marker reachability. The incidence score also penalizes
+        misalignment between the gaze axis and the eye-to-screen-centre line.
+        A bounded numerical optimization evaluates the screen on a regular
+        grid; the palm reachability objective uses the extended-arm hulls
+        independently of any fitted grip posture.
         By default only neck-base flexion/extension is free to change; the
         trunk, shoulders, and elbows remain at their current posture unless
         corresponding ranges are supplied.
@@ -869,10 +928,14 @@ class VisualErgonomicsFramework(Framework):
             If weights are invalid, parameter values or bounds are invalid,
             the screen is unavailable, or no feasible position exists.
         """
-        weights = np.array(
-            [incidence_weight, observed_screen_weight, reachability_weight],
-            dtype=float,
-        )
+        weight_values = [
+            incidence_weight,
+            observed_screen_weight,
+            reachability_weight,
+        ]
+        if _neck_flexion_weight is not None:
+            weight_values.append(_neck_flexion_weight)
+        weights = np.array(weight_values, dtype=float)
         if (
             not np.all(np.isfinite(weights))
             or np.any(weights < 0.0)
@@ -880,6 +943,8 @@ class VisualErgonomicsFramework(Framework):
             or not math.isclose(float(weights.sum()), 1.0, abs_tol=1e-8)
         ):
             raise ValueError("objective weights must be in [0, 1] and sum to 1")
+        screen_weights = weights[:3]
+        neck_weight = weights[3] if len(weights) == 4 else 0.0
         if not isinstance(inplace, bool):
             raise TypeError("inplace must be bool")
         if not isinstance(max_iterations, int) or max_iterations < 1:
@@ -895,6 +960,7 @@ class VisualErgonomicsFramework(Framework):
                 cloned_bike,
                 self.cone_width_angle_deg,
                 self.cone_height_angle_deg,
+                self.line_of_sight_offset_deg,
             )
 
         coordinate_ranges = target._coordinate_ranges(
@@ -1017,6 +1083,14 @@ class VisualErgonomicsFramework(Framework):
             if bounds[1] > allowed[1]:
                 coordinate.setRangeMax(math.radians(bounds[1]))
             coordinate_bounds[name] = bounds
+        neck_coordinate = coordinates.get("neck_base_flexion")
+        neck_range = coordinate_bounds.get("neck_base_flexion")
+        if neck_range is None:
+            neck_range = (
+                math.degrees(neck_coordinate.getRangeMin()),
+                math.degrees(neck_coordinate.getRangeMax()),
+            )
+        neck_scale = max(abs(neck_range[0]), abs(neck_range[1]), 1.0)
 
         parameter_specs: list[tuple[str, float, float, float]] = []
         screen_values = {
@@ -1075,8 +1149,14 @@ class VisualErgonomicsFramework(Framework):
             violation = np.minimum(
                 target._screen_constraints(screen_position(values)), 0.0
             )
+            neck_flexion_deg = math.degrees(
+                neck_coordinate.getValue(state)
+            )
+            neck_score = 1.0 - min(abs(neck_flexion_deg) / neck_scale, 1.0)
             return float(
-                -np.dot(weights, scores) + 1000.0 * np.dot(violation, violation)
+                -np.dot(screen_weights, scores)
+                - neck_weight * neck_score
+                + 1000.0 * np.dot(violation, violation)
             )
 
         def screen_feasibility(free_values: np.ndarray) -> np.ndarray:
@@ -1126,25 +1206,26 @@ class VisualErgonomicsFramework(Framework):
     def optimize_user_position(
         self,
         *,
-        incidence_weight: float = 0.34,
-        observed_screen_weight: float = 0.33,
-        reachability_weight: float = 0.33,
+        incidence_weight: float = 0.3,
+        observed_screen_weight: float = 0.2,
+        reachability_weight: float = 0.3,
+        neck_flexion_weight: float = 0.2,
         inplace: bool = False,
         lumbar_extension_deg: OptimizationParameter = None,
-        arm_flex_r_deg: OptimizationParameter = None,
-        arm_add_r_deg: OptimizationParameter = None,
-        arm_rot_r_deg: OptimizationParameter = None,
-        elbow_flex_r_deg: OptimizationParameter = None,
-        pro_sup_r_deg: OptimizationParameter = None,
-        wrist_flex_r_deg: OptimizationParameter = None,
-        wrist_dev_r_deg: OptimizationParameter = None,
-        arm_flex_l_deg: OptimizationParameter = None,
-        arm_add_l_deg: OptimizationParameter = None,
-        arm_rot_l_deg: OptimizationParameter = None,
-        elbow_flex_l_deg: OptimizationParameter = None,
-        pro_sup_l_deg: OptimizationParameter = None,
-        wrist_flex_l_deg: OptimizationParameter = None,
-        wrist_dev_l_deg: OptimizationParameter = None,
+        right_shoulder_flexion_deg: OptimizationParameter = None,
+        right_shoulder_adduction_deg: OptimizationParameter = None,
+        right_shoulder_rotation_deg: OptimizationParameter = None,
+        right_elbow_flexion_deg: OptimizationParameter = None,
+        right_forearm_pronation_deg: OptimizationParameter = None,
+        right_wrist_flexion_deg: OptimizationParameter = None,
+        right_wrist_deviation_deg: OptimizationParameter = None,
+        left_shoulder_flexion_deg: OptimizationParameter = None,
+        left_shoulder_adduction_deg: OptimizationParameter = None,
+        left_shoulder_rotation_deg: OptimizationParameter = None,
+        left_elbow_flexion_deg: OptimizationParameter = None,
+        left_forearm_pronation_deg: OptimizationParameter = None,
+        left_wrist_flexion_deg: OptimizationParameter = None,
+        left_wrist_deviation_deg: OptimizationParameter = None,
         neck_base_flexion_deg: OptimizationParameter = (-30.0, 30.0),
         neck_base_lateral_flexion_deg: OptimizationParameter = None,
         neck_lateral_flexion_deg: OptimizationParameter = None,
@@ -1162,9 +1243,11 @@ class VisualErgonomicsFramework(Framework):
 
         Parameters
         ----------
-        incidence_weight, observed_screen_weight, reachability_weight : float
-            Weights for screen incidence, visual-cone coverage, and hand
-            reachability. They must be in ``[0, 1]`` and sum to one.
+        incidence_weight, observed_screen_weight, reachability_weight,
+        neck_flexion_weight : float
+            Weights for screen incidence/alignment, visual-cone coverage,
+            hand reachability, and neutral neck flexion. They must be in
+            ``[0, 1]`` and sum to one.
         inplace : bool, default=False
             If true, modify this framework and return ``None``; otherwise
             optimize independent model copies and return the new framework.
@@ -1184,20 +1267,20 @@ class VisualErgonomicsFramework(Framework):
         """
         coordinate_parameters = {
             "lumbar_extension": lumbar_extension_deg,
-            "arm_flex_r": arm_flex_r_deg,
-            "arm_add_r": arm_add_r_deg,
-            "arm_rot_r": arm_rot_r_deg,
-            "elbow_flex_r": elbow_flex_r_deg,
-            "pro_sup_r": pro_sup_r_deg,
-            "wrist_flex_r": wrist_flex_r_deg,
-            "wrist_dev_r": wrist_dev_r_deg,
-            "arm_flex_l": arm_flex_l_deg,
-            "arm_add_l": arm_add_l_deg,
-            "arm_rot_l": arm_rot_l_deg,
-            "elbow_flex_l": elbow_flex_l_deg,
-            "pro_sup_l": pro_sup_l_deg,
-            "wrist_flex_l": wrist_flex_l_deg,
-            "wrist_dev_l": wrist_dev_l_deg,
+            "arm_flex_r": right_shoulder_flexion_deg,
+            "arm_add_r": right_shoulder_adduction_deg,
+            "arm_rot_r": right_shoulder_rotation_deg,
+            "elbow_flex_r": right_elbow_flexion_deg,
+            "pro_sup_r": right_forearm_pronation_deg,
+            "wrist_flex_r": right_wrist_flexion_deg,
+            "wrist_dev_r": right_wrist_deviation_deg,
+            "arm_flex_l": left_shoulder_flexion_deg,
+            "arm_add_l": left_shoulder_adduction_deg,
+            "arm_rot_l": left_shoulder_rotation_deg,
+            "elbow_flex_l": left_elbow_flexion_deg,
+            "pro_sup_l": left_forearm_pronation_deg,
+            "wrist_flex_l": left_wrist_flexion_deg,
+            "wrist_dev_l": left_wrist_deviation_deg,
             "neck_base_flexion": neck_base_flexion_deg,
             "neck_base_lateral_flexion": neck_base_lateral_flexion_deg,
             "neck_lateral_flexion": neck_lateral_flexion_deg,
@@ -1208,6 +1291,7 @@ class VisualErgonomicsFramework(Framework):
             incidence_weight=incidence_weight,
             observed_screen_weight=observed_screen_weight,
             reachability_weight=reachability_weight,
+            _neck_flexion_weight=neck_flexion_weight,
             inplace=inplace,
             neck_flexionextension_range_deg=None,
             head_extensionflexion_range_deg=None,
@@ -1221,17 +1305,18 @@ class VisualErgonomicsFramework(Framework):
     def _refresh_visualization(self) -> None:
         """Rebuild the visual cone and palm-marker reachability surfaces.
 
-        The cone and its central axis are generated from the eye midpoint and
-        head orientation. For each side, the reach surface reuses the same
-        sampled palm-marker hull as the quantitative screen-area analysis,
-        transformed into a shoulder-centred body frame for display.
+        The cone and its central axis use the configured line-of-sight offset
+        from the head plane through the eye midpoint. For each side, the reach
+        surface reuses the same sampled palm-marker hull as the quantitative
+        screen-area analysis, transformed into a shoulder-centred body frame
+        for display.
         """
         user_state = self._user_state()
-        eye, head_rotation = self._eye_center_and_head_rotation()
+        eye, visual_rotation = self._eye_center_and_line_of_sight_rotation()
         screen_corners = self._screen_points()
         forward_distance = max(
             0.5,
-            float(np.max((screen_corners - eye) @ head_rotation[:, 0])) + 0.15,
+            float(np.max((screen_corners - eye) @ visual_rotation[:, 0])) + 0.15,
         )
         pyramid_points, pyramid_faces = _pyramid_mesh(
             self.cone_width_angle_deg,
@@ -1254,9 +1339,9 @@ class VisualErgonomicsFramework(Framework):
             [cone],
             _MESH_DENSITY,
             location=eye,
-            orientation=matrix_to_euler_xyz(head_rotation),
+            orientation=matrix_to_euler_xyz(visual_rotation),
         )
-        axis_center = eye + head_rotation[:, 0] * forward_distance / 2
+        axis_center = eye + visual_rotation[:, 0] * forward_distance / 2
         axis = Cylinder(
             radius=0.0015,
             length=forward_distance,
@@ -1269,7 +1354,7 @@ class VisualErgonomicsFramework(Framework):
             [axis],
             _MESH_DENSITY,
             location=axis_center,
-            orientation=matrix_to_euler_xyz(head_rotation),
+            orientation=matrix_to_euler_xyz(visual_rotation),
         )
 
         for side, color in (
@@ -1333,6 +1418,7 @@ class VisualErgonomicsFramework(Framework):
             self.equipment,
             self.cone_width_angle_deg,
             self.cone_height_angle_deg,
+            self.line_of_sight_offset_deg,
         )
         return result
 
@@ -1349,6 +1435,7 @@ class VisualErgonomicsFramework(Framework):
             equipment,
             self.cone_width_angle_deg,
             self.cone_height_angle_deg,
+            self.line_of_sight_offset_deg,
         )
         memo[id(self)] = result
         return result
