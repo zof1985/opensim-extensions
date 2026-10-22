@@ -32,13 +32,13 @@ class GroupCycle3(Bike):
             # horns
             horn_pitch_deg=33.0,
             horn_roll_deg=10.0,
-            horn_length_mm=120.0,
+            horn_length_mm=260.0,
             # screen parameters
             screen_width_mm=60.0,
             screen_height_mm=110.0,
             screen_inclination_deg=40.0,
-            screen_vertical_offset_mm=32.0,
-            screen_horizontal_offset_mm=217.0,
+            screen_vertical_offset_mm=28.5,
+            screen_horizontal_offset_mm=213.0,
             # frame
             frame_tube_diameter_mm=40.0,
             frame_width_mm=500.0,
