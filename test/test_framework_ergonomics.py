@@ -494,6 +494,29 @@ def test_optimize_user_position_defaults_to_neck_range(manager):
     assert gaze_angles == pytest.approx((0.0, 0.0), abs=1e-4)
 
 
+def test_neck_base_flexion_changes_sagittal_gaze(manager):
+    coordinates = manager.user.getCoordinateSet()
+    state = manager._user_state()
+    neck_base = coordinates.get("neck_base_flexion")
+    original_neck_base = neck_base.getValue(state)
+    screen_position = (
+        manager.equipment.screen_horizontal_offset_mm,
+        manager.equipment.screen_vertical_offset_mm,
+        manager.equipment.screen_inclination_deg,
+    )
+    initial_gaze = manager._gaze_center_coordinates(screen_position)[1]
+    try:
+        neck_base.setValue(state, np.deg2rad(10.0), False)
+        manager.user.realizePosition(state)
+        flexed_gaze = manager._gaze_center_coordinates(screen_position)[1]
+    finally:
+        neck_base.setValue(state, original_neck_base, False)
+        manager.user.realizePosition(state)
+
+    assert abs(flexed_gaze[0] - initial_gaze[0]) > np.deg2rad(1.0)
+    assert flexed_gaze[1] == pytest.approx(initial_gaze[1], abs=1e-4)
+
+
 def test_optimize_user_position_aligns_gaze_without_neck_optimization(
     manager, monkeypatch
 ):

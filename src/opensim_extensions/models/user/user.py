@@ -271,14 +271,20 @@ class User(opensim.Model, _MeasurementMixin, _PostureMixin, _JointCenterMixin):
         self.addBody(neck)
         self.addBody(skull)
         neck.attachGeometry(neck_mesh)
+        # Map the universal joint's X/Y axes to anatomical flexion/lateral flexion.
+        neck_joint_orientation = opensim.Vec3(
+            -math.pi / 2,
+            0.0,
+            -math.pi / 2,
+        )
         base_neck_joint = opensim.UniversalJoint(
             "torso_neck",
             torso,
             opensim.Vec3(0.0, 0.445, 0.0),
-            opensim.Vec3(0),
+            neck_joint_orientation,
             neck,
             opensim.Vec3(0.0, 0.445, 0.0),
-            opensim.Vec3(0),
+            neck_joint_orientation,
         )
         base_neck_coordinates = (
             ("neck_base_flexion", -0.7, 0.85),
