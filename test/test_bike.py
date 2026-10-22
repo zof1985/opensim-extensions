@@ -20,6 +20,7 @@ from opensim_extensions.bodies import (
 )
 from opensim_extensions.models.equipment import Equipment, Screen
 from opensim_extensions.models.equipment.bikes.bike import _horn_direction
+from opensim_extensions.models.equipment.bikes.fitting import _horn_local
 from opensim_extensions.models.equipment.bikes.groupcycle3 import GroupCycle3
 
 
@@ -363,6 +364,32 @@ def test_horn_pitch_raises_tips_and_positive_roll_turns_horns_medially():
     assert left[2] > 0.0
 
 
+@pytest.mark.parametrize("side, sign", [("r", 1.0), ("l", -1.0)])
+@pytest.mark.parametrize("pitch, roll", [(0.0, 0.0), (33.0, 10.0)])
+def test_horn_palm_target_is_centered_and_tangent_to_outer_cylinder_side(
+    side, sign, pitch, roll
+):
+    bike = Bike(
+        handlebar_diameter_mm=40.0,
+        handlebar_width_mm=450.0,
+        horn_length_mm=120.0,
+        horn_pitch_deg=pitch,
+        horn_roll_deg=roll,
+    )
+    target = _horn_local(bike, side, hand_breadth_mm=90.0)
+    start = np.array([0.0, 0.0, sign * bike._handlebar_width_mm * 1e-3 / 2])
+    direction = _horn_direction(pitch, roll, side)
+    from_start = target - start
+    longitudinal_position = float(np.dot(from_start, direction))
+    radial_position = from_start - longitudinal_position * direction
+
+    assert longitudinal_position == pytest.approx(bike._horn_length_mm * 1e-3 / 2)
+    assert np.linalg.norm(radial_position) == pytest.approx(
+        (bike._handlebar_diameter_mm + 90.0) * 0.5e-3
+    )
+    assert sign * radial_position[2] > 0.0
+
+
 def test_bike_screen_offsets_must_be_positive():
     for value in (-1.0, 0.0):
         with pytest.raises(ValueError):
@@ -499,6 +526,14 @@ def test_fit_user_adjusts_unspecified_trunk_to_reach_handlebar_horns():
     assert user.lumbar_extension != pytest.approx(initial_lumbar, abs=1e-3)
     assert report["trunk_angle_deg"] > 20.0
     assert report["hand_error_mm"] < 5.0
+    hand_breadth_mm = float(user.anthropometry.values["handbreadth"])
+    for side, marker_name in (("r", "RPALM"), ("l", "LPALM")):
+        marker = user.getMarkerSet().get(marker_name).getLocationInGround(user.state)
+        palm_center = np.array([marker.get(index) for index in range(3)])
+        target = bike._handlebar_position_m + _horn_local(
+            bike, side, hand_breadth_mm
+        )
+        assert palm_center == pytest.approx(target, abs=5e-3)
     coordinates = user.getCoordinateSet()
     for right_name, left_name in (
         ("arm_flex_r", "arm_flex_l"),

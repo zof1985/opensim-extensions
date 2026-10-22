@@ -447,6 +447,9 @@ class VTKVisualizer:
         geometry_property = body.getPropertyByName("attached_geometry")
         for index in range(geometry_property.size()):
             geometry = body.get_attached_geometry(index)
+            appearance = geometry.get_Appearance()
+            if not appearance.get_visible():
+                continue
             source = self._build_geometry_source(geometry, opensim)
             if source is None:
                 continue
@@ -460,7 +463,6 @@ class VTKVisualizer:
             # the light-gray background it was mistaken for exactly that,
             # at a glance, more than once while debugging this module.
             actor.GetProperty().SetColor(0.75, 0.76, 0.8)
-            appearance = geometry.get_Appearance()
             opacity = appearance.get_opacity()
             if opacity < 1.0 or body_name.startswith("vision_cone_axis"):
                 color = geometry.getColor()

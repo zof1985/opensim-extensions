@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opensim-extensions"
-version = "7"
+version = "8"
 description = "Frameworks, anthropometric users, and visualization for OpenSim"
 requires-python = ">=3.10"
 dependencies = [

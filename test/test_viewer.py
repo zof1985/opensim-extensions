@@ -85,6 +85,22 @@ def test_overlay_controls_report_unavailable_layers_for_plain_models():
         visualizer.close()
 
 
+def test_visualizer_skips_geometry_marked_invisible():
+    model = make_model()
+    body = model.getBodySet().get("body")
+    geometry = opensim.Brick(opensim.Vec3(0.1, 0.2, 0.3))
+    geometry.upd_Appearance().set_visible(False)
+    body.attachGeometry(geometry)
+    model.finalizeConnections()
+    model.initSystem()
+
+    visualizer = VTKVisualizer(_ViewerModel(model), offscreen=True)
+    try:
+        assert not visualizer._actor_bodies
+    finally:
+        visualizer.close()
+
+
 def make_pin_model() -> opensim.Model:
     model = opensim.Model()
     body = opensim.Body("body", 1.0, opensim.Vec3(0), opensim.Inertia(1))

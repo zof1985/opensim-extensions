@@ -338,11 +338,29 @@ def _handlebar_pose(
     return bike._handlebar_position_at(tube_step, slide_step), np.eye(3)
 
 
-def _horn_local(bike: Any, side: str) -> np.ndarray:
+def _horn_local(
+    bike: Any, side: str, hand_breadth_mm: float
+) -> np.ndarray:
+    """Return the palm-centre target tangent to a horn at its length midpoint."""
     sign = 1.0 if side == "r" else -1.0
     start = np.array([0.0, 0.0, sign * bike._handlebar_width_mm * 1e-3 / 2])
     direction = _horn_direction(bike._horn_pitch_deg, bike._horn_roll_deg, side)
-    return start + bike._horn_length_mm * 1e-3 / 2 * direction
+    outward = np.array([0.0, 0.0, sign])
+    normal = outward - np.dot(outward, direction) * direction
+    normal_length = float(np.linalg.norm(normal))
+    if normal_length <= 1e-12:
+        fallback = np.array([1.0, 0.0, 0.0])
+        normal = fallback - np.dot(fallback, direction) * direction
+        normal_length = float(np.linalg.norm(normal))
+    normal /= normal_length
+    contact_offset = (
+        bike._handlebar_diameter_mm + hand_breadth_mm
+    ) * 0.5e-3
+    return (
+        start
+        + bike._horn_length_mm * 1e-3 / 2 * direction
+        + contact_offset * normal
+    )
 
 
 class _ArmFit:
@@ -531,7 +549,10 @@ def fit_user(
     3. With the tube fixed, the seat slide step is the one for which the right
        knee joint centre is closest to the vertical of the right pedal axis.
        The user's hip centres sit on the seat top surface, pelvis upright.
-    4. The trunk starts at the user's current ``lumbar_extension`` when
+    4. The palm centres are targeted halfway along each horn and offset to
+       the outside by the horn radius plus half the user's hand breadth, so
+       the palm's lateral edge meets the horn cylinder. The trunk starts at
+       the user's current ``lumbar_extension`` when
        ``trunk_angle_deg`` is ``None``, otherwise at the requested inclination
        (forward from the vertical, of the mid-hip to mid-shoulder line;
        0 = upright, pelvis upright). A specified trunk angle is kept fixed;
@@ -652,7 +673,16 @@ def fit_user(
     def grips_at(tube: int, slide: int) -> np.ndarray:
         centre, rotation = _handlebar_pose(bike, tube, slide)
         return np.concatenate(
-            [centre + rotation @ _horn_local(bike, s) for s in ("r", "l")]
+            [
+                centre
+                + rotation
+                @ _horn_local(
+                    bike,
+                    side,
+                    float(user.anthropometry.values["handbreadth"]),
+                )
+                for side in ("r", "l")
+            ]
         )
 
     steps = [
